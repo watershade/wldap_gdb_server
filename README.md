@@ -1,549 +1,174 @@
-# cmsis_dap_tcp for OpenOCD
+# WLDAP GDB Server
 
-OpenOCD supports the CMSIS-DAP protocol to communicate with a JTAG / SWD
-programmer. Typically this is a local programmer with a USB connection. With
-the addition of the OpenOCD cmsis_dap_tcp backend, the CMSIS-DAP protocol can
-now run over TCP/IP instead of USB. This allows OpenOCD to connect to a remote
-programmer over the network.
+ESP32-C5-MINI 上的无线 CMSIS-DAP 固件：OpenOCD 通过 TCP 连接这块板子，板子再用 SWD 调试目标 MCU。目标是让 IAR / VS Code 在没有 USB 线、没有 USB/IP 驱动的情况下烧写和调试 STM32 一类目标板。
 
-This project provides the remote-side implementation of the cmsis_dap_tcp
-protocol, using an ESP32 as the remote programmer. It allows a cheap ESP32
-board to program and debug an ARM microcontroller target. Both JTAG and the
-two-wire SWD interface are supported. OpenOCD connects to the ESP32 using
-TCP/IP over WiFi, allowing remote flashing and debugging of the target
-board.
-
-![diagram](img/cmsis_dap_tcp_diagram.svg)
-
-- Tested with ESP32 S3, C3, and C6 boards as programmer and several STM32
-  development boards (F4xx, F103, G0xx) as targets. A Lattice ECP5 FPGA target
-  has also been used successfully.
-- Either JTAG mode or SWD mode can be used to program the target. 2 GPIO are
-  needed for SWD, or a minimum of 4 GPIO for JTAG.
-- An optional GPIO pin can be used to drive the NRST# (SRST) signal, but this
-  is typically not required.
-- In JTAG mode, an optional GPIO pin can be used to drive the TRST signal, but
-  this is typically not required.
-- A separate GPIO can drive an activity LED controlled by OpenOCD (standard or
-  RGB LED).
-- UART to TCP/IP bridge can be enabled to provide access to the target board's
-  serial console remotely, using an ESP32 UART.
-- Up to 3 independent JTAG/SWD interfaces can be supported simultaneously.
-- Up to 3 independent UART bridges can be supported simultaneously.
-- Typical performance:
-  - SWD reading / writing SRAM: up to 200 KB/sec
-  - SWD flashing a 512 KB firmware image to the STM32F401RE
-  completes in about 13.4 seconds, including erase, program, and verify (with 4
-  to 8 seconds of that time used for flash erasure). The Blue Pill takes about
-  6 seconds for a 64KB image.
-  - Performance depends on the quality of your WiFi network.
-
-# Supported boards
-
-The following boards were tested so far. They were chosen because they are
-inexpensive and readily available from Amazon, AliExpress, Seeed Studio,
-DigiKey, etc.
-
-- Expressif [ESP32-S3 Devkit C1](https://www.digikey.com/en/products/detail/espressif-systems/ESP32-S3-DEVKITC-1-N8R8/15295894) and clones
-- Unbranded HW-466AB [ESP32-C3 Super Mini](https://www.aliexpress.us/w/wholesale-esp32-c3-super-mini.html)
-- Seeed Studio [XIAO ESP32-C6](https://www.seeedstudio.com/Seeed-Studio-XIAO-ESP32C6-p-5884.html)
-
-Pinouts are configurable, but these are the defaults:
-
-![ESP32-S3-Devkit-C1 pinout](img/esp32s3_devkitc_1.png)
-
-![ESP32-C3 Super Mini pinout](img/esp32c3_super_mini.png)
-
-![XIAO ESP32-C6 pinout](img/xiao_esp32c6_pinout.png)
-
-The CMSIS-DAP code came from the Firmware directory of the [CMSIS-DAP
-repo](https://github.com/ARM-software/CMSIS-DAP). ```DAP_config.h``` was then
-modified to support the ESP32 GPIO.
-```
-commit 1fd47bed772ea40923472c90dfe11516e76033ee (HEAD -> main, tag: v2.1.2, origin/main, origin/HEAD)
+```text
+IAR 9 / VS Code
+      │ GDB Remote (:3333)
+      ▼
+OpenOCD（PC）
+      │ CMSIS-DAP over TCP (:4441)
+      ▼
+ESP32-C5-MINI（本仓库固件）
+      │ SWD
+      ▼
+目标 MCU
 ```
 
-# Limitations
+## 来源与继承
 
-The software has some limitations:
+本仓库是 **[bkuschak/cmsis_dap_tcp_esp32](https://github.com/bkuschak/cmsis_dap_tcp_esp32)** 的 fork，遵循 Apache License 2.0。
 
-- SWO is currently unsupported.
-- Maximum clock rate is ~6 MHz and duty cycle can vary from ~33% to ~66%.
-- JTAG is significantly slower than SWD due to the way OpenOCD works.
+上游本身也不是从零写的：它的 CMSIS-DAP 实现来自 ARM 的 [CMSIS-DAP](https://github.com/ARM-software/CMSIS-DAP) 固件目录，并修改 `DAP_config.h` 以适配 ESP32 的 GPIO 位操作。所以这条代码血统是：
 
-# Building and Flashing the Firmware
-
-This code requires the ESP-IDF build tools. Refer to the official
-[installation guide](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/get-started/index.html#installation)
-and install them first. This project was tested using ESP-IDF v6.0.2.
-
-Activate your ESP-IDF virtual environment:
-
-```
-. $HOME/esp/esp-idf/export.sh
+```text
+ARM CMSIS-DAP 固件  →  bkuschak/cmsis_dap_tcp_esp32  →  watershade/wldap_gdb_server
 ```
 
-The code supports different boards as 'presets'. They are described by the
-CMakePresets.json file. Multiple board builds can coexist without interference
-as each one uses its own build directory. To see the list of supported boards:
+上游支持 ESP32-S3 / C3 / C6，**不支持 ESP32-C5**。本仓库的主要工作就是补上 C5 这一块，以及配套的主机侧配置和文档。
 
-```
-cmake --list-presets
+上游的详细说明（menuconfig 选项、控制台命令、UART bridge、ADC 流、性能数据等）仍然有效，见 [上游 README](https://github.com/bkuschak/cmsis_dap_tcp_esp32#readme)。
 
-Available configure presets:
+## 相对上游的改动
 
-  "board_esp32s3_devkit_c1"  - Espressif ESP32-S3 Devkit C1 board
-  "board_yd_esp32_s3"        - VCC-GND Studio YD-ESP32-S3 (Devkit C1 clone)
-  "board_esp32s3_zero"       - Waveshare ESP32-S3-Zero board
-  "board_esp32c3_super_mini" - ESP32-C3 SuperMini board
-  "board_xiao_esp32c6"       - Seeed Studio Xiao ESP32-C6 board
-  "board_xiao_esp32c6_alt"   - Seeed Studio Xiao ESP32-C6 board (alternate pins for UART bridge)
-```
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `sdkconfig.board_esp32c5_mini` | 新增 | ESP32-C5-MINI 板级配置：目标 `esp32c5`、仅 SWD、SWCLK=GPIO6 / SWDIO=GPIO7 / nRESET=GPIO5、关闭 JTAG、关闭 UART bridge、无 LED、产品名 `CMSIS-DAP-TCP ESP32-C5-MINI WLDAP` |
+| `CMakePresets.json` | 修改 | 新增 `board_esp32c5_mini` preset，`binaryDir` 为 `build/build_esp32c5_mini` |
+| `host/openocd-wldap.cfg` | 新增 | OpenOCD 侧的 `cmsis-dap backend tcp` 配置，指向 C5 的 IP、端口 4441、`min_timeout 300` |
+| `host/README.md` | 新增 | 主机侧接线、构建、烧写、IAR 9 / VS Code 配置说明 |
+| `scripts/build_wldap.sh` | 新增 | 走 preset 的构建脚本；处理 ESP-IDF activate 脚本的 `set -u` / `$0` 兼容问题 |
+| `scripts/flash_wldap.sh` | 新增 | 烧写 + monitor |
+| `.vscode/launch.json` | 新增 | 用 ESP-IDF 扩展调试 C5 自身固件（内置 USB-JTAG） |
+| `.vscode/settings.json` | 新增 | 指定 buildPath、OpenOCD 板级配置、clangd |
+| `.clangd` | 新增 | 去掉不适用于交叉编译的 `-f*` / `-m*` 参数 |
+| `README.md` | 修改 | 本文件；上游原文见链接 |
 
-If you are using one of the supported boards, type <b>one</b> of the following
-lines, and all subsequent ```idf.py``` commands will target that specific
-build.
+**没有改动 `main/` 下的任何源码。** 协议解析、SWD 位操作、WiFi、UART bridge 全部是上游与 ARM 的原样代码，版权头保留在各自文件里。C5 的适配完全通过 Kconfig / sdkconfig 完成，这也是上游支持新板子的既定方式（preset + sdkconfig）。
 
-```
-export IDF_PRESET=board_esp32s3_devkit_c1
-export IDF_PRESET=board_yd_esp32_s3
-export IDF_PRESET=board_esp32s3_zero
-export IDF_PRESET=board_esp32c3_super_mini
-export IDF_PRESET=board_xiao_esp32c6
-export IDF_PRESET=board_xiao_esp32c6_alt
-```
+## 硬件
 
-Then proceed with the build and installation:
+| 功能 | C5-MINI 引脚 | 说明 |
+|---|---|---|
+| SWCLK | GPIO6 | 建议串 100Ω |
+| SWDIO | GPIO7 | 建议串 100Ω，100k 上拉 |
+| nRESET | GPIO5 | 开漏，可选，串 100Ω |
+| GND | GND | 必须接 |
+| 5V | VIN | 4.5–6V，模组内部 LDO 转 3.3V |
+| 目标 UART（可选） | TX=GPIO11 / RX=GPIO12 | 不要用 IO14，IO14 是 USB D+ |
 
-```
-idf.py fullclean menuconfig build flash
-```
+注意事项：
 
-* In menuconfig, goto to the "CMSIS-DAP configuration" page.
+- 模组的 `RST` 是芯片 EN，不是目标的 nRESET。
+- 模组 `3V3` 是 LDO 输出，不要反灌；要 3.3V 供电请先测反向电流。
+- 内置 USB-JTAG 用 GPIO13/GPIO14（D-/D+），与上面的 SWD 引脚不冲突。
 
-  <img src="img/menuconfig1.png" width="75%" />
+## 构建
 
-* Hardcoded WiFi credentials can be configured on the "WiFi configuration"
-  subpage.  (If you are not using WPA2, you might need to adjust the WiFi Scan
-  auth mode threshold). WiFi credentials can also be changed at runtime using
-  the ```wifi``` console command, and these will be stored in flash memory.
+需要 ESP-IDF。本仓库在 **ESP-IDF v6.1** 上验证，上游在 v6.0.2 上验证。
 
-  <img src="img/menuconfig2.png" width="75%" />
+```bash
+# 激活 ESP-IDF
+. ~/.espressif/tools/activate_idf_v6.1.sh    # 或你自己的 export.sh
 
-* If needed, you can change the GPIO port pins for JTAG, SWD, reset, and LED on
-  the "GPIO number assignments" subpage. The signals can be disabled if they
-  are not needed. Up to 3 indepedent CMSIS-DAP interfaces can be enabled, if
-  enough pins are available. Drive strength for the JTAG/SWD pins can be
-  changed. The weakest drive is selected by default to minimize the effects of
-  crosstalk and ringing when using cables.
+# 方式一：preset
+idf.py --preset board_esp32c5_mini build
 
-  <img src="img/menuconfig3.png" width="75%" />
-
-* If you want to use the UART to TCP/IP bridge, it can be configured on the
-  the "UART to TCP/IP bridge" subpage. The baud rate and other default
-  settings can be changed at runtime using the ```uart``` console command. A
-  script ```host/uart_bridge.sh``` is provided that uses ```socat``` to present
-  the remote UART as a pseudo-tty that can be opened using any serial terminal
-  program on the host. The first UART bridge uses UART1 by default. Up to 3
-  independent UART bridges can be enabled, if enough UARTs are available.
-
-  <img src="img/menuconfig4.png" width="75%" />
-
-* The console uses the native USB-Serial port. This port is non-blocking when
-  no USB host is connected (with ESP-IDF v5.1+), so the device operates
-  normally without a USB host attached.  UART0 is unused. If you want to use
-  UART0 for console instead, update the console settings in menuconfig and
-  assign the UART bridge to GPIO pins that do not conflict with the UART0
-  pins.
-
-   ```
-   Component config → ESP System Settings → Channel for console output → Default UART
-   Component config → ESP System Settings → Channel for console secondary output → No secondary
-   CMSIS-DAP config → UART Bridge → Select GPIO numbers → enabled
-   CMSIS-DAP config → UART Bridge → UART TX → (choose an available GPIO)
-   CMSIS-DAP config → UART Bridge → UART RX → (choose an available GPIO)
-   ```
-
-* It is also possible to stream voltage measurements from one ADC channel over
-  another TCP/IP socket. Refer to the ADC streaming page. Sample rate,
-  averaging, and other parameters are configurable in menuconfig and also using
-  the ```adc``` console command.
-
-   ```
-   CMSIS-DAP config → ADC streaming → Enable ADC streaming
-   ```
-
-If you want to use this code as a component in another application see [this
-section](#usage-as-a-component) below.
-
-If you experience problems, additional debugging messages can be enabled in
-menuconfig. This will impact performance.
-
-```
-CMSIS-DAP configuration → Enable debug logging for the CMSIS-DAP TCP server
+# 方式二：脚本
+./scripts/build_wldap.sh
 ```
 
-# Running the Firmware
+产物在 `build/build_esp32c5_mini/`：
 
-If you like, you can run the serial monitor to view and control the console. To
-exit the serial monitor use ```Ctrl+]```.
-
-```
-idf.py monitor
+```text
+cmsis_dap_tcp_esp32.elf
+cmsis_dap_tcp_esp32.bin
 ```
 
-Show the available console commands.
+> 构建目录不要放在 Windows 挂载盘（`/mnt/c`、`/mnt/d`、`/mnt/e`）上。9p 文件系统会让并行编译长时间卡在 D 状态；源码和 build 目录都放在 ext4 的 `$HOME` 下。
 
+## WiFi 配置
+
+默认 SSID 是占位符 `myssid`，必须改，否则板子连不上网。
+
+**方式一：menuconfig**
+
+```text
+Component config → CMSIS-DAP configuration → WiFi configuration
 ```
-esp32> help
-Available commands:
-  help - Show this help message.
-  wifi "<ssid>" "<password>" [auth_mode] - Configure WiFi credentials.
-  uart <instance> <baud_rate> <data_bits> <parity> <stop_bits> - Configure UART bridge settings.
-  reboot - Restart the device.
-  status - Report network status.
-esp32>
-```
 
-## Connecting to WiFi
+**方式二：运行时（串口控制台）**
 
-After booting, the ESP32 will attempt to connect to WiFi. By default it will
-use the hardcoded credentials provided in menuconfig. Optionally, you can
-change these credentials at runtime using the command interface on the USB
-serial console. To do this, use the ```wifi``` command and reboot afterwards:
-
-```
-esp32> wifi "my ssid" "my password" wpa2
+```text
+esp32> wifi "你的SSID" "你的密码" wpa2
 esp32> reboot
 ```
 
-To undo this and revert back to the hardcoded credentials, use empty strings:
+## 烧写与运行
 
-```
-esp32> wifi "" ""
-esp32> reboot
-```
+```bash
+# WSL 下先确认 USB 设备已 attach（usbipd-win）
+ls /dev/ttyACM0
 
-If you must use an open WiFi without encryption, specify ```open``` with an
-empty password:
-
-```
-esp32> wifi "guest wifi" "" open
-esp32> reboot
+./scripts/flash_wldap.sh
+# 或
+idf.py --preset board_esp32c5_mini -p /dev/ttyACM0 flash monitor
 ```
 
-After the ESP32 has connected to WiFi and obtained an IP address by DHCP you
-can then run OpenOCD. The ESP32 will print status and error messages to the
-console, including the WiFi connection status and IP address. A message is
-printed whenever the OpenOCD client connects or disconnects. (Only one active
-client is allowed).
+启动后串口会打印 IP 地址和监听端口，例如：
 
-You should see something like this from the ESP32:
-
-```
-CMSIS-DAP TCP running on ESP32
-ESP-IDF version: v6.0.2
-Hardware version: esp32c3 with 1 CPU core(s), WiFi/BLE, silicon revision v0.4, 2MB external flash
-Minimum free heap size: 281772 bytes
-MAC address: 70AF0912F000
-Enabling console commands.
-Attempting to connect to WiFi SSID: 'SomeWifiRouter'
-Connected to WiFi SSID: 'SomeWifiRouter'. RSSI: -61 dBm
-IP address: 192.168.0.198
-Disabling WiFi power savings to improve performance.
-cmsis_dap_tcp 1: JTAG/SWD, port 4441. GPIO (weakest): SWCLK=0 SWDIO=1 TDI=9 TDO=10 NTRST=7 NRESET=2 LED=8
-cmsis_dap_tcp 2: SWD, port 4443. GPIO (weakest): SWCLK=3 SWDIO=4
-cmsis_dap_tcp 3: SWD, port 4445. GPIO (weakest): SWCLK=6 SWDIO=5
-UART bridge 1: using UART1 settings from flash: 115200-8-N-1
-UART bridge 1: UART1, listening on port 4442. GPIOs: TX=21 RX=20
-IPv6 address (link-local): fe80:0000:0000:0000:72af:09ff:fe12:f000
+```text
+cmsis_dap_tcp 1: JTAG/SWD, port 4441. GPIO (weakest): SWCLK=6 SWDIO=7 NRESET=5
 ```
 
-You can check the network status at any time by using the status command:
+## 主机侧：OpenOCD
 
-```
-esp32>  status
-Connected to WiFi SSID: 'SomeWifiRouter'. RSSI: -61 dBm
-IP address: 192.168.0.198
-IPv6 address (link-local): fe80:0000:0000:0000:72af:09ff:fe12:f000
-cmsis_dap_tcp 1: JTAG/SWD, port 4441. GPIO (weakest): SWCLK=0 SWDIO=1 TDI=9 TDO=10 NTRST=7 NRESET=2 LED=8
-cmsis_dap_tcp 2: SWD, port 4443. GPIO (weakest): SWCLK=3 SWDIO=4
-cmsis_dap_tcp 3: SWD, port 4445. GPIO (weakest): SWCLK=6 SWDIO=5
-UART bridge 1: UART1, listening on port 4442. 115200-8-N-1. GPIOs: TX=21 RX=20.
-UART bridge 1: connected to client '192.168.0.55:63381'. Bytes: TX=2759 RX=32454.
-```
+PC 上的 OpenOCD 必须带 `--enable-cmsis-dap-tcp` 编译。用 `host/openocd-wldap.cfg`：
 
-# Building and Running OpenOCD
-
-Get the latest source code from git. Configure and build it as usual:
-
-```
-git clone git://git.code.sf.net/p/openocd/code openocd
-cd openocd
-./bootstrap
-./configure
-make
-```
-
-An OpenOCD configuration file has been provided for convenience.
-Edit your ```tcl/interface/cmsis-dap-tcp.cfg``` configuration file to point to
-your ESP32's IP address:
-
-```
+```tcl
 adapter driver cmsis-dap
 cmsis-dap backend tcp
-cmsis-dap tcp host 192.168.1.107
+cmsis-dap tcp host 192.168.1.123
 cmsis-dap tcp port 4441
-transport select swd
-adapter speed 6000
-reset_config none
-```
-
-If you are on a slow network, you might need to add this line to avoid short
-timeouts that can lead to command mismatch errors in some cases. If so, specify
-a longer timeout in milliseconds:
-
-```
 cmsis-dap tcp min_timeout 300
+transport select swd
+adapter speed 1000
 ```
 
-To flash an STM32 target, for example, run the following command from your
-OpenOCD build directory.  Replace ```firmware.elf``` with the name of your
-ELF file, and ```stm32f1x.cfg``` with the appropriate file for your
-microcontroller.
-
-```
-./src/openocd --search tcl \
-              -f tcl/interface/cmsis-dap-tcp.cfg \
-              -f tcl/target/stm32f1x.cfg \
-              -c "program firmware.elf verify reset exit"
+```bash
+openocd -f host/openocd-wldap.cfg -f target/stm32f1x.cfg
 ```
 
-To read/write SRAM, for example:
+看到 `Listening on port 3333 for gdb connections` 即可。
 
-```
-dd if=/dev/random of=random_96kb.bin bs=1024 count=96
+## IAR 9 / VS Code
 
-./src/openocd --search tcl \
-              -f tcl/interface/cmsis-dap-tcp.cfg \
-              -f tcl/target/stm32f1x.cfg \
-              -c "adapter speed 6000" \
-              -c "init; halt; reset; poll off" \
-              -c "load_image random_96kb.bin 0x20000000" \
-              -c "dump_image /dev/null 0x20000000 0x18000" \
-              -c "shutdown"
-```
+- **IAR 9**：`Project → Options → Debugger → Setup → Driver` 选 `GDB Server`，Host `127.0.0.1`，Port `3333`。先开 OpenOCD，再连 IAR。
+- **VS Code**：Cortex-Debug，`servertype: external` + `gdbTarget: localhost:3333`，或直接 `servertype: openocd`。
+- 同一个 OpenOCD 同时只能接一个 GDB 客户端。
 
-The LED normally illuminates whenever OpenOCD is connected to the ESP32. If you
-want to control it manually or from scripts, you can use this OpenOCD command
-to turn it off / on:
+## 调试 C5 自身固件
 
-```
-# cmsis-dap cmd <Command_ID 0x01> <LED_Selection> <LED_State>
-cmsis-dap cmd 0x01 0x00 0x00
-cmsis-dap cmd 0x01 0x00 0x01
+用 VS Code Remote（WSL）+ ESP-IDF 扩展，走 C5 的内置 USB-JTAG，不需要额外探针：
+
+```json
+"idf.openOcdConfigs": ["board/esp32c5-builtin.cfg"]
 ```
 
-Once everything is working you may disconnect the ESP32 from your PC and run
-it as a standalone device. It can be powered by a USB charger. This could be
-your normal use case, where the ESP32 is directly connected to a remote target,
-and all debugging and flash programming is done over the network.
+`.vscode/launch.json` 已配好，F5 即连 `:3333` 并停在 `app_main`。
 
-# Performance
+注意：`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y` 时，串口控制台和内置 JTAG 共用同一个 USB 控制器。调试会话进行中不要同时开 `idf.py monitor`。
 
-The observed performance is summarized below. Your performance will depend on
-your particular WiFi network environment. The C6 seems to suffer due to a
-complex internal bus architecture that leads to lower throughput.
+## 已知限制
 
-| Board | Chip / arch | CPU clock | SWCLK speed (max) | SRAM write (avg) | SRAM read (avg) |
-|---|---|---|---|---|---|
-| ESP32-S3 DevKitC-1 | ESP32-S3, Xtensa | 240 MHz | 5.3 MHz | ~200 KB/sec | ~80 KB/sec |
-| ESP32-C3 Super Mini | ESP32-C3, RISC-V | 160 MHz | 5.0 MHz | ~175 KB/sec | ~80 KB/sec |
-| Xiao ESP32-C6 (alt) | ESP32-C6, RISC-V | 160 MHz | 1.4 MHz | ~90 KB/sec | ~50 KB/sec |
+- 不支持 SWO；需要 printf 请用 UART bridge 或目标板自己的串口。
+- SWCLK 上限约 6 MHz（位操作 + 时钟域切换），占空比不固定。
+- 同时只允许一个 OpenOCD 客户端。
+- 吞吐取决于 WiFi 质量；上游实测 S3 约 200 KB/s（SRAM 写）、C3 约 175 KB/s、C6 约 90 KB/s。C5 尚未实测。
+- 只支持 CMSIS-DAP over TCP 的主机工具。Keil 需要 USB/IP 或 elaphureLink，属后续工作。
 
-<br>
+## 许可
 
-![performance](img/performance.svg)
+Apache License 2.0，见 [LICENSE](LICENSE)。
 
-On the ESP32-S3 @ 240MHz, a single SWD 32-bit transfer completes in less than
-10 microseconds, with a maximum SWCLK clock rate of ~5 MHz. Due to
-bit-banging and clock domain crossing, the SWCLK duty cycle is not 50% and it
-may vary slightly from one transfer to the next. An SWD read cycle is pictured
-below. Yellow is SWCLK. Green is SWDIO.
-
-<br>
-
-![scopeshot1](img/scopeshot1.png)
-
-<br>
-
-![scopeshot1](img/scopeshot2.png)
-
-Actual performance will depend on your WiFi network. For slow networks,
-you might need to increase the ```cmsis-dap tcp min_timeout``` parameter if
-you see error messages related to command mismatch.
-
-Starting the OpenOCD server like this:
-
-```
-./src/openocd \
-    --search tcl \
-    -c "debug_level 2" \
-    -c "adapter driver cmsis-dap" \
-    -c "transport select swd" \
-    -c "cmsis-dap backend tcp" \
-    -c "cmsis-dap tcp host 192.168.1.107" \
-    -c "cmsis-dap tcp port 4441" \
-    -c "cmsis-dap tcp min_timeout 150" \
-    -f "tcl/target/stm32f4x.cfg" \
-    -c "reset_config none"
-
-Open On-Chip Debugger 0.12.0+dev-01114-gbf01f1089 (2025-08-07-11:52)
-Licensed under GNU GPL v2
-For bug reports, read
-	http://openocd.org/doc/doxygen/bugs.html
-Info : CMSIS-DAP: using minimum timeout of 100 ms for TCP packets.
-none separate
-Info : Listening on port 6666 for tcl connections
-Info : Listening on port 4444 for telnet connections
-Info : CMSIS-DAP: Connecting to 192.168.1.107:4441 using TCP backend
-Info : CMSIS-DAP: SWD supported
-Info : CMSIS-DAP: JTAG supported
-Info : CMSIS-DAP: Atomic commands supported
-Info : CMSIS-DAP: Test domain timer supported
-Info : CMSIS-DAP: FW Version = 2.1.2
-Info : CMSIS-DAP: Serial# = E4B323B60EB4
-Info : CMSIS-DAP: Interface Initialised (SWD)
-Info : SWCLK/TCK = 0 SWDIO/TMS = 0 TDI = 0 TDO = 0 nTRST = 0 nRESET = 1
-Info : CMSIS-DAP: Interface ready
-Info : clock speed 2000 kHz
-Info : SWD DPIDR 0x2ba01477
-Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected
-Info : [stm32f4x.cpu] target has 6 breakpoints, 4 watchpoints
-Info : [stm32f4x.cpu] Examination succeed
-Info : [stm32f4x.cpu] starting gdb server on 3333
-Info : Listening on port 3333 for gdb connections
-Info : accepting 'telnet' connection on tcp/4444
-```
-
-## Using ESP32-S3 @ 240 MHz
-
-Performance is highest on ESP32-S3. The throughput seems more variable
-on each run, but here are some representative numbers connecting to an
-STM32F401RE target and reading and writing SRAM:
-
-```
-% telnet localhost 4444
-> poll off
-
-> load_image ./random_96kb.bin 0x20000000
-98304 bytes written at address 0x20000000
-downloaded 98304 bytes in 0.489488s (196.123 KiB/s)
-
-> dump_image /dev/null 0x20000000 0x18000
-dumped 98304 bytes in 0.832846s (115.267 KiB/s)
-```
-
-## Using ESP32-C3 @ 160 MHz
-
-ESP32-C3 running at 160 MHz is single core and lower frequency but its
-performance in this case is just slightly below the S3.
-
-## Using ESP32-C6 @ 160 MHz
-
-Xiao ESP32C6 running at 160 MHz is considerably slower. After multiple
-unsuccessful attempts to optimize peformance, it seems that the more complex
-internal bus structure leads to lower performance for the GPIO bit-banging.
-
-Connecting to an STM32F401RE target and reading and writing SRAM:
-
-```
-% telnet localhost 4444
-> poll off
-
-> load_image ./random_96kb.bin 0x20000000
-98304 bytes written at address 0x20000000
-downloaded 98304 bytes in 1.092678s (87.858 KiB/s)
-
-> dump_image /dev/null 0x20000000 0x18000
-dumped 98304 bytes in 1.469766s (65.317 KiB/s)
-```
-
-Programming and verifying a 512 KB flash image takes about 20 seconds:
-
-```
-time ./src/openocd \
-    --search tcl \
-    -c "debug_level 2" \
-    -c "adapter driver cmsis-dap" \
-    -c "transport select swd" \
-    -c "cmsis-dap backend tcp" \
-    -c "cmsis-dap tcp host 192.168.1.107" \
-    -c "cmsis-dap tcp port 4441" \
-    -f "tcl/target/stm32f4x.cfg" \
-    -c "reset_config none" \
-    -c "program ${ELF} verify reset exit"
-
-Open On-Chip Debugger 0.12.0+dev-01114-gbf01f1089 (2025-08-07-11:52)
-Licensed under GNU GPL v2
-For bug reports, read
-	http://openocd.org/doc/doxygen/bugs.html
-none separate
-Info : CMSIS-DAP: Connecting to 192.168.1.107:4441 using TCP backend
-Info : CMSIS-DAP: SWD supported
-Info : CMSIS-DAP: JTAG supported
-Info : CMSIS-DAP: Atomic commands supported
-Info : CMSIS-DAP: Test domain timer supported
-Info : CMSIS-DAP: FW Version = 2.1.2
-Info : CMSIS-DAP: Serial# = E4B323B60EB4
-Info : CMSIS-DAP: Interface Initialised (SWD)
-Info : SWCLK/TCK = 0 SWDIO/TMS = 0 TDI = 0 TDO = 0 nTRST = 0 nRESET = 1
-Info : CMSIS-DAP: Interface ready
-Info : clock speed 2000 kHz
-Info : SWD DPIDR 0x2ba01477
-Info : [stm32f4x.cpu] Cortex-M4 r0p1 processor detected
-Info : [stm32f4x.cpu] target has 6 breakpoints, 4 watchpoints
-Info : [stm32f4x.cpu] Examination succeed
-Info : [stm32f4x.cpu] starting gdb server on 3333
-Info : Listening on port 3333 for gdb connections
-[stm32f4x.cpu] halted due to debug-request, current mode: Thread
-xPSR: 0x01000000 pc: 0x08000734 msp: 0x20018000
-** Programming Started **
-Info : device id = 0x10016433
-Info : flash size = 512 KiB
-** Programming Finished **
-** Verify Started **
-** Verified OK **
-** Resetting Target **
-shutdown command invoked
-
-real    0m19.242s
-user    0m0.052s
-sys     0m0.155s
-```
-
-## ADC streaming
-
-As a development/debugging aid, live ADC measurements can be streamed and
-plotted using the ```host/adc_stream_plot.py``` script.  Refer to the
-experimental feature ```CONFIG_ESP_ADC_STREAM_ENABLED```. The ESP32 ADCs tend
-to be noisy, so you might want to enable maximum averaging. Here is a plot of
-the ADC reading from a current sense amplifier:
-
-![scopeshot1](img/adc_streaming.png)
-
-# Usage as a component
-
-Two additional features were added by [@w531t4](https://github.com/w531t4) and
-integrated into the project. Thank you!
-
-This cmsis_dap_tcp server may be incorporated as a component in another
-application.  Simply define your CMAKE_PROJECT_NAME as something other than
-“cmsis_dap_tcp_esp32”.  This will cause ```main.c``` to be left out of the
-project.  Replace the functionality of ```main.c``` with your own
-implementation.  Be sure to call ```cmsis_dap_tcp_start(&config,
-"cmsis_dap_tcp_task", …)``` and pass a valid ```cmsis_dap_tcp_config```
-structure to define each interface.
-
-Also, an ESPHome wrapper is available
-[here](https://github.com/w531t4/ESPHome-cmsis_dap_tcp_esp32-Wrapper).
+上游版权归 Brian Kuschak 及 ARM Limited / Espressif Systems 所有，各源文件保留原始 SPDX 头。本仓库的修改说明见 [NOTICE](NOTICE)。

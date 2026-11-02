@@ -66,7 +66,17 @@
         "SDKCONFIG": "build/build_xiao_esp32c6_alt/sdkconfig",
         "SDKCONFIG_DEFAULTS": "sdkconfig.defaults;sdkconfig.board_xiao_esp32c6_alt"
       }
+    },
+    {
+      "name": "board_esp32c5_mini",
+      "displayName": "ESP32-C5-MINI WLDAP board",
+      "description": "Builds for the ESP32-C5-MINI wireless DAP (WLDAP)",
+      "binaryDir": "build/build_esp32c5_mini",
+      "cacheVariables": {
+        "IDF_TARGET": "esp32c5",
+        "SDKCONFIG": "build/build_esp32c5_mini/sdkconfig",
+        "SDKCONFIG_DEFAULTS": "sdkconfig.defaults;sdkconfig.board_esp32c5_mini"
+      }
     }
   ]
 }
-

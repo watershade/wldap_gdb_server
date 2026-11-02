@@ -1,0 +1,40 @@
+WLDAP GDB Server
+================
+
+This repository is a fork of cmsis_dap_tcp_esp32 by Brian Kuschak
+(https://github.com/bkuschak/cmsis_dap_tcp_esp32), which is licensed under the
+Apache License, Version 2.0.
+
+That upstream project in turn contains CMSIS-DAP firmware code from ARM Limited
+(https://github.com/ARM-software/CMSIS-DAP) and Espressif Systems sources.
+Original copyright notices and SPDX headers are retained in every source file.
+
+Modifications in this fork
+--------------------------
+
+Added:
+  sdkconfig.board_esp32c5_mini   ESP32-C5-MINI board configuration
+  host/openocd-wldap.cfg         OpenOCD CMSIS-DAP-over-TCP configuration
+  host/README.md                 host-side wiring and usage notes
+  scripts/build_wldap.sh         build wrapper for the C5 preset
+  scripts/flash_wldap.sh         flash + monitor wrapper
+  .vscode/launch.json            debug configuration for the C5 built-in USB-JTAG
+  .vscode/settings.json          build path / OpenOCD board / clangd settings
+  .clangd                        clangd compile-flag adjustments
+
+Modified:
+  CMakePresets.json              added the board_esp32c5_mini configure preset
+  README.md                      replaced with a WLDAP-specific description of
+                                 this fork and its relationship to upstream
+
+No source file under main/ was modified. Protocol handling, SWD bit-banging,
+WiFi, and UART bridge code remain as received from upstream.
+
+The ESP32-C5 target support is implemented entirely through Kconfig values in
+sdkconfig.board_esp32c5_mini, which is the board-support mechanism used by
+upstream.
+
+License
+-------
+
+Licensed under the Apache License, Version 2.0. See LICENSE for the full text.

@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "gdbtarget",
+      "request": "launch",
+      "name": "WLDAP: C5 built-in USB-JTAG",
+      "program": "${workspaceFolder}/build/build_esp32c5_mini/cmsis_dap_tcp_esp32.elf",
+      "runOpenOCD": true,
+      "initialBreakpoint": "app_main",
+      "verifyAppBinBeforeDebug": false,
+      "target": {
+        "connectCommands": [
+          "set remotetimeout 20",
+          "target remote localhost:3333"
+        ]
+      }
+    }
+  ]
+}
