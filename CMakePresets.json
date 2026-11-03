@@ -76,6 +76,23 @@
         "IDF_TARGET": "esp32c5",
         "SDKCONFIG": "build/build_esp32c5_mini/sdkconfig",
         "SDKCONFIG_DEFAULTS": "sdkconfig.defaults;sdkconfig.board_esp32c5_mini"
+      },
+      "vendor": {
+        "espressif/vscode-esp-idf": {
+          "schemaVersion": 1,
+          "settings": [
+            {
+              "type": "openOCD",
+              "value": {
+                "debugLevel": 2,
+                "configs": [
+                  "board/esp32c5-builtin.cfg"
+                ],
+                "args": []
+              }
+            }
+          ]
+        }
       }
     }
   ]

@@ -19,5 +19,6 @@ set +u
 source "$IDF_ACTIVATE"
 set -euo pipefail
 cd "$PROJECT_DIR"
-idf.py -B "$BUILD_DIR" -p "$PORT" flash monitor
+python3 "$IDF_PATH/tools/idf.py" --preset board_esp32c5_mini \
+  -B "$BUILD_DIR" -p "$PORT" flash monitor
 '

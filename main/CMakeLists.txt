@@ -11,7 +11,7 @@ set(COMPONENT_SRCS
 # Include the app entrypoint only for the standalone firmware project, so
 # other ESP-IDF projects can consume this directory as a component.
 if(CMAKE_PROJECT_NAME STREQUAL "cmsis_dap_tcp_esp32")
-    list(APPEND COMPONENT_SRCS "main.c")
+    list(APPEND COMPONENT_SRCS "status_led.c" "main.c")
 endif()
 
 set(PRIV_REQUIRES "spi_flash" "esp_driver_gpio" "esp_adc" "esp_app_format")

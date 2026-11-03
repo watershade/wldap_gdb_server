@@ -2,15 +2,17 @@
     "idf.currentSetup": "/mnt/d/espressif/v6.1/esp-idf",
     "idf.buildPath": "build/build_esp32c5_mini",
     "idf.openOcdConfigs": [
-        "board/esp32c5-builtin.cfg"
+      "board/esp32c5-builtin.cfg"
     ],
     "idf.customExtraVars": {
-      "IDF_PRESET": "board_esp32c5_mini"
+      "IDF_PRESET": "board_esp32c5_mini",
+      "IDF_TARGET": "esp32c5"
     },
     "clangd.path": "/home/john/.espressif/tools/esp-clangd/esp-21.1.3_20260408/esp-clangd/bin/clangd",
     "clangd.arguments": [
       "--background-index",
       "--query-driver=**",
-      "--compile-commands-dir=${workspaceFolder}/build/build_esp32c5_mini"
-    ]
+      "--compile-commands-dir=/home/john/Workspace/WLDAP/wldap_gdb_server/build/build_esp32c5_mini"
+    ],
+    "idf.flashType": "JTAG"
 }

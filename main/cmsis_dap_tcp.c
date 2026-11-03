@@ -20,6 +20,7 @@
 #include "DAP_config.h"
 #include "DAP.h"
 #include "cmsis_dap_tcp.h"
+#include "status_led.h"
 
 #ifdef CONFIG_ESP_DAP_TCP_DEBUG_PRINTING
 #define LOG_DEBUG(...) \
@@ -240,6 +241,7 @@ static int process_dap_request(struct cmsis_dap_tcp_state *state, int sock,
     // DAP_ProcessCommand returns:
     //   number of bytes in response (lower 16 bits)
     //   number of bytes in request (upper 16 bits)
+    status_led_note_dap_activity();
     int ret = DAP_ProcessCommand(request, state->response);
     int request_len __attribute__((unused)) = (ret>>16) & 0xFFFF;
     int response_len = ret & 0xFFFF;
@@ -539,6 +541,7 @@ void cmsis_dap_tcp_task(void *arg)
     int client_fd = -1;
     int run __attribute__((unused)) = 0;
     state->client_connected = false;
+    status_led_set(STATUS_LED_READY);
     state->client_ip_str[0] = '\0';
 
     while (1) {
@@ -608,6 +611,7 @@ void cmsis_dap_tcp_task(void *arg)
                 client_fd = new_fd;
                 msgbuf_init(&state->buf);
                 state->client_connected = true;
+                status_led_set(STATUS_LED_CONNECTED);
                 continue;   // restart select() loop
             }
         }
@@ -622,6 +626,7 @@ void cmsis_dap_tcp_task(void *arg)
                     close(client_fd);
                     client_fd = -1;
                     state->client_connected = false;
+                    status_led_set(STATUS_LED_READY);
                     state->client_ip_str[0] = '\0';
                     continue;   // restart select() loop
                 }
@@ -649,6 +654,7 @@ void cmsis_dap_tcp_task(void *arg)
                     close(client_fd);
                     client_fd = -1;
                     state->client_connected = false;
+                    status_led_set(STATUS_LED_READY);
                     state->client_ip_str[0] = '\0';
                     break;
                 }
@@ -658,6 +664,7 @@ void cmsis_dap_tcp_task(void *arg)
 
     fprintf(stdout, "cmsis_dap_tcp %d: shutting down.\n", task_state->config->instance);
     state->client_connected = false;
+    status_led_set(STATUS_LED_READY);
 
     if (client_fd >= 0) close(client_fd);
     close(listener_fd);

@@ -30,6 +30,7 @@
 
 #include "wifi.h"
 #include "reboot.h"
+#include "status_led.h"
 
 #if CONFIG_ESP_STATION_EXAMPLE_WPA3_SAE_PWE_HUNT_AND_PECK
 #define ESP_WIFI_SAE_MODE WPA3_SAE_PWE_HUNT_AND_PECK
@@ -210,15 +211,18 @@ static void event_handler(void* arg, esp_event_base_t event_base,
                  */
                 fprintf(stderr, "Lost connection to WiFi SSID: '%s'. Rebooting...\n",
                         wifi_ssid);
+                status_led_set(STATUS_LED_ERROR);
                 reboot();       // Does not return.
             }
             if (wifi_retry_num < CONFIG_ESP_MAXIMUM_RETRY) {
                 printf("Retrying connection to WiFi SSID: '%s'\n", wifi_ssid);
+                status_led_set(STATUS_LED_WIFI_CONNECTING);
                 esp_wifi_connect();
                 wifi_retry_num++;
             }
             else {
                 fprintf(stderr, "Failed to connect to WiFi SSID: '%s'.\n", wifi_ssid);
+                status_led_set(STATUS_LED_WIFI_FAILED);
                 xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
             }
         }
@@ -227,6 +231,7 @@ static void event_handler(void* arg, esp_event_base_t event_base,
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         printf("IP address: " IPSTR "\n", IP2STR(&event->ip_info.ip));
         wifi_retry_num = 0;
+        status_led_set(STATUS_LED_READY);
         xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
     }
 #ifdef CONFIG_LWIP_IPV6

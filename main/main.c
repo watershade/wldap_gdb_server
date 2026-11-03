@@ -55,6 +55,7 @@
 #include "uart_bridge.h"
 #include "commands.h"
 #include "reboot.h"
+#include "status_led.h"
 
 #ifdef CONFIG_ESP_DAP_MANAGE_WIFI
 #include "wifi.h"
@@ -504,6 +505,12 @@ static BaseType_t socket_console_task_start(void)
 
 void app_main(void)
 {
+    // Visual "I am alive" signature before the comparatively slow WiFi
+    // association starts. Runs synchronously (~1 s) on purpose.
+    status_led_init();
+    status_led_boot_pattern();
+    status_led_start();
+
     // DAP_Setup() runs in cmsis_dap_tcp_task(), which owns the task-local DAP
     // state used while processing CMSIS-DAP requests.
     printf("CMSIS-DAP TCP running on ESP32\n");
@@ -573,14 +580,20 @@ void app_main(void)
     /* Initialize WiFi and connect to AP. If unable to connect after retries,
      * then force a reboot in an attempt to recover.
      */
+    status_led_set(STATUS_LED_WIFI_CONNECTING);
     if (wifi_init() != 0) {
         fprintf(stderr, "Restarting due to WiFi connection failures.\n");
+        status_led_set(STATUS_LED_ERROR);
         reboot();
     }
 #endif
 
     if(cmsis_dap_tcp_task_start() != pdPASS) {
         fprintf(stderr, "Failed to start CMSIS-DAP-TCP task.\n");
+        status_led_set(STATUS_LED_ERROR);
+    }
+    else {
+        status_led_set(STATUS_LED_READY);
     }
 
 #ifdef CONFIG_ESP_DAP_2_ENABLED

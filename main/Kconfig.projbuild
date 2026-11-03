@@ -1164,3 +1164,47 @@ menu "CMSIS-DAP configuration"
             to avoid counter overflow.
 
 endmenu
+
+menu "WLDAP board status LED"
+
+    config WLDAP_STATUS_LED
+        bool "Enable the board status LED"
+        default y
+        help
+            Drive one plain GPIO as a board status indicator. This is
+            independent of the CMSIS-DAP interface LEDs
+            (CONFIG_ESP_DAP_n_LED_*), which only mirror the DAP_HostStatus
+            "debugger connected" command.
+
+            Patterns:
+              boot                four short blinks
+              WiFi connecting     slow 1 Hz pulse
+              WiFi failed         three quick blips, then a pause
+              idle, no debugger   one short blip every 2 s
+              debugger attached   solid on
+              SWD traffic         fast twinkle
+              flash download      near-solid, brief dip every 500 ms
+              fatal error         six fast blips, then a pause
+
+    config WLDAP_STATUS_LED_GPIO
+        int "GPIO number for the status LED"
+        default 23
+        depends on WLDAP_STATUS_LED
+        help
+            Must not collide with any pin used by a CMSIS-DAP interface
+            (SWCLK, SWDIO, nRESET, ...) or with the UART bridge.
+
+    choice WLDAP_STATUS_LED_POLARITY
+        prompt "Status LED polarity"
+        default WLDAP_STATUS_LED_ACTIVE_LOW
+        depends on WLDAP_STATUS_LED
+        help
+            Whether driving the pin high or low lights the LED.
+
+        config WLDAP_STATUS_LED_ACTIVE_HIGH
+            bool "Active high (pin high = lit)"
+        config WLDAP_STATUS_LED_ACTIVE_LOW
+            bool "Active low (pin low = lit)"
+    endchoice
+
+endmenu

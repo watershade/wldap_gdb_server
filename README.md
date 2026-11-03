@@ -57,12 +57,32 @@ ARM CMSIS-DAP 固件  →  bkuschak/cmsis_dap_tcp_esp32  →  watershade/wldap_g
 | GND | GND | 必须接 |
 | 5V | VIN | 4.5–6V，模组内部 LDO 转 3.3V |
 | 目标 UART（可选） | TX=GPIO11 / RX=GPIO12 | 不要用 IO14，IO14 是 USB D+ |
+| 状态灯 | GPIO23 | 蓝色 LED，**低电平点亮** |
 
 注意事项：
 
 - 模组的 `RST` 是芯片 EN，不是目标的 nRESET。
 - 模组 `3V3` 是 LDO 输出，不要反灌；要 3.3V 供电请先测反向电流。
 - 内置 USB-JTAG 用 GPIO13/GPIO14（D-/D+），与上面的 SWD 引脚不冲突。
+
+### 状态指示灯
+
+板载蓝色 LED（GPIO23，低电平点亮）由 `main/status_led.c` 驱动，独立于 CMSIS-DAP 的接口 LED。模式：
+
+| 状态 | 灯效 |
+|---|---|
+| 上电 | 连闪 4 次（120 ms 亮 / 120 ms 灭） |
+| WiFi 连接中 | 1 Hz 慢闪 |
+| WiFi 失败 | 快闪 3 下 + 长停，循环 |
+| 就绪（无调试器） | 每 2 秒一次短闪 |
+| 调试器已连接 | 常亮 |
+| SWD 有数据交互 | 快速闪烁（约 17 Hz） |
+| 批量传输 / 下载固件 | 近似常亮，每 0.5 秒一个短暗点 |
+| 致命错误（即将重启） | 快闪 6 下 + 停顿，循环 |
+
+“批量传输”是靠 SWD 数据连续性判断的：连续 0.8 秒无 300 ms 以上间歇即视为整块读写（烧写），不是目标侧的精确状态。
+
+Kconfig：`CONFIG_WLDAP_STATUS_LED`、`CONFIG_WLDAP_STATUS_LED_GPIO`、`CONFIG_WLDAP_STATUS_LED_ACTIVE_LOW/HIGH`。
 
 ## 构建
 

@@ -14,7 +14,14 @@ CONFIG_ESP_DAP_1_GPIO_SWCLK_TCK=6
 CONFIG_ESP_DAP_1_GPIO_SWDIO_TMS=7
 CONFIG_ESP_DAP_1_GPIO_NRESET=5
 
-# No status LED on the first prototype.
+# Board status LED: blue LED on GPIO23, active LOW (current sinks into the pin).
+CONFIG_WLDAP_STATUS_LED=y
+CONFIG_WLDAP_STATUS_LED_GPIO=23
+CONFIG_WLDAP_STATUS_LED_ACTIVE_LOW=y
+
+# The per-interface CMSIS-DAP LED stays off: it only mirrors
+# DAP_HostStatus(DEBUGGER_CONNECTED) and would fight the status LED module
+# for the same pin.
 CONFIG_ESP_DAP_1_LED_NONE=y
 
 # UART bridge is disabled for the first bring-up to avoid pin conflicts.

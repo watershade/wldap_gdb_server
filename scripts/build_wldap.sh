@@ -20,9 +20,7 @@ set +u
 source "$IDF_ACTIVATE"
 set -euo pipefail
 cd "$PROJECT_DIR"
-idf.py -B "$BUILD_DIR" \
-  -DIDF_TARGET=esp32c5 \
-  -DSDKCONFIG="$BUILD_DIR/sdkconfig" \
-  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.board_esp32c5_mini" \
-  build
+# Invoke idf.py through python3 so sys.executable matches the
+# interpreter recorded in the CMake cache (a mismatch is fatal).
+python3 "$IDF_PATH/tools/idf.py" --preset board_esp32c5_mini -B "$BUILD_DIR" build
 '
