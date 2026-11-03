@@ -368,8 +368,8 @@ WiFi 凭据存在 NVS，重新烧写 `app` 不会丢；只有 `erase-flash` 才�
 | IAR 报 `Failed to load flash loader: ...FlashSTM32G47xxx.flash` | IAR 设备宏 `STM32G4xx.dmac` 用 `"AP0_Memory"` zone，GDB Server 驱动不认，`execUserFlashInit` 直接 `Operation error` | 把 `<IAR>\arm\config\debugger\ST\STM32G4xx.dmac` 里的 `"AP0_Memory"` 全替换成 `"Memory"`（先备份） |
 | 同上，但 OpenOCD 日志里一个写包都没有 | 宏在本地就被拒了，包根本没发出来 | 同上；用 `scripts/iar_download.sh` 能直接看到 `STM32G4xx.dmac(85,34): Error: Operation error` |
 | IAR 报 `Flashloader encountered a HardFault exception` | loader 已在芯片里运行但异常 | 先 `reset halt` 清掉残留的软件断点/RAM 改写；再看 `CFSR`（`0x1` = 取指访问违例，通常是跳到外设地址） |
-| 点 Download and Debug 卡在“进入调试”，OpenOCD 日志出现 `Cortex-M Flash Patch Breakpoint rev.1 cannot handle HW breakpoint above address 0x1FFFFFFE` | IAR 下载阶段的 flash loader 跑在 RAM（`0x2000_xxxx`），Cortex-M4 的 FPB rev1 只能在 `0x1FFF_FFFF` 以下比较，硬件断点加不上，IAR 就一直等 | 面板的 GDB 代理会按断点地址逐包切换：RAM 地址用软件断点、flash 地址用硬件比较器（`gdb breakpoint_override`）。若这条错误还在，说明 IDE 绕过了代理直连 WSL 端口 |
-| IAR 复位后停不到 main / 断点不生效 | 应用断点在 flash 里，若用软件断点 OpenOCD 写不进 flash，断点只存在它的内部表里 | 同样由代理保证：`0x0800_0000` 起的断点走硬件比较器（G474 有 6 个）；面板日志会打印 `$Z1,08004xxx -> 硬件 断点` |
+| 点 Download and Debug 卡在“进入调试”，OpenOCD 日志出现 `Cortex-M Flash Patch Breakpoint rev.1 cannot handle HW breakpoint above address 0x1FFFFFFE` | IAR 给它的 flash loader（跑在 RAM `0x2000_xxxx`）下的是软件断点，但 `gdb breakpoint_override hard` 把它强制成硬件断点，而 Cortex-M4 的 FPB rev1 只在 `0x1FFF_FFFF` 以下比较，于是断点加不上、IAR 一直等 | 不要全局强制。面板的 GDB 代理只在芯片物理上办不到时才替换：RAM 地址的硬件断点请求改成软件断点（改写 `Z1`→`Z0` 并重算校验），flash 地址的软件断点请求交给硬件比较器（`gdb breakpoint_override hard`）。其余包原样转发 |
+| IAR 复位后停不到 main / 断点不生效 | `_call_main` 在 flash 里，IAR 却用软件断点（GDB Server → Breakpoints → `Restore software breakpoints at _call_main`），OpenOCD 写不进 flash，断点只存在它的内部表里 | 同上，代理把这个软件断点请求转成硬件比较器（G474 有 6 个）。若还有问题再看 `Project → Options → Debugger → Setup → Run to main` |
 
 ---
 

@@ -856,29 +856,55 @@ fn trace_bp(state: &Arc<Mutex<State>>, msg: &str) {
     }
 }
 
-/// GDB 断点必须按地址选类型，不能一刀切：
-///  - flash 里的应用代码：IDE 发 `Z0`（软件断点），OpenOCD 写不进 flash，
-///    断点静默失效 → “停不到 main”“复位后停不下来”；
-///  - RAM 里跑 flash loader 时下的断点：Cortex-M4 的 FPB rev1 只能在
-///    0x1FFF_FFFF 以下比较，强制硬件会让 0x2000_xxxx 断点直接失败，
-///    IDE 于是卡死在“进入调试”。
-/// 返回 Some(true)=用硬件比较器，Some(false)=用软件断点。
-fn bp_mode_for_packet(pkt: &[u8]) -> Option<bool> {
-    if pkt.len() < 7 || pkt[0] != b'$' || pkt[1] != b'Z' {
+/// 断点包决定要不要动，以及怎么动。
+/// 返回 None 表示原样转发；Some((hard, 替换包)) 表示先把覆盖模式设成 hard/soft
+/// （None 表示不用改模式），并且可能把包改写后再发。
+///
+/// 两条铁律，都来自芯片而不是偏好：
+///  - Cortex-M 的 FPB 比较器只在代码区 0x0000_0000–0x1FFF_FFFF 有效，所以
+///    对 RAM（如 flash loader 所在的 0x2000_xxxx）的硬件断点请求根本做不到，
+///    只能改成软件断点（0xBE00 打进 RAM，合法且可靠）；
+///  - 反过来，软件断点需要写目标内存，flash 写不进去，所以 flash 里的软件
+///    断点请求只能交给硬件比较器。
+/// 除此之外一律照 IDE 的意思办。
+fn decide_breakpoint(pkt: &[u8]) -> Option<(Option<bool>, Option<Vec<u8>>)> {
+    if pkt.len() < 8 || pkt[0] != b'$' || pkt[1] != b'Z' || pkt[3] != b',' {
         return None;
     }
-    let t = pkt[2];
-    if t != b'0' && t != b'1' {
-        return None; // Z2..Z4 是 watchpoint，本来就只在硬件里
-    }
-    // 包体是 Z<类型>,<地址>,<长度>#<校验>，地址从逗号之后开始
-    if pkt[3] != b',' {
-        return None;
+    let kind = pkt[2];
+    if kind != b'0' && kind != b'1' {
+        return None; // watchpoint 之类，不从这里走
     }
     let body = std::str::from_utf8(&pkt[4..]).ok()?;
     let addr_s = body.split(',').next()?;
     let addr = u64::from_str_radix(addr_s, 16).ok()?;
-    Some(addr < 0x2000_0000)
+
+    if addr >= 0x2000_0000 {
+        // 代码区之外：硬件比较器覆盖不到，必须用软件断点
+        if kind == b'1' {
+            return Some((Some(false), Some(rewrite_to_software(pkt))));
+        }
+        return Some((Some(false), None));
+    }
+    // 代码区（flash）：软件断点写不进去，交给硬件比较器
+    if kind == b'0' {
+        return Some((Some(true), None));
+    }
+    None
+}
+
+/// 把 `$Z1,<地址>,<长度>#xx` 改写成 `$Z0,...#xx`（重算校验和）。
+fn rewrite_to_software(pkt: &[u8]) -> Vec<u8> {
+    let hash = pkt.len() - 3;
+    let mut out = Vec::with_capacity(pkt.len());
+    out.push(b'$');
+    out.push(b'Z');
+    out.push(b'0');
+    out.extend_from_slice(&pkt[4..hash]);
+    let ck = out[1..].iter().fold(0u8, |a, &b| a.wrapping_add(b));
+    out.push(b'#');
+    out.extend_from_slice(format!("{:02x}", ck).as_bytes());
+    out
 }
 
 /// 通过 telnet 改 OpenOCD 的断点覆盖模式，并等它回提示符，确保下一条
@@ -984,21 +1010,26 @@ fn pump_upstream(
                 break;
             }
             let pkt: Vec<u8> = pending.drain(..i + 3).collect();
-            if let Some(hard) = bp_mode_for_packet(&pkt) {
-                if mode != Some(hard) && apply_bp_mode(&state, &telnet, hard) {
-                    mode = Some(hard);
+            let mut outgoing = pkt;
+            if let Some((target_mode, rewritten)) = decide_breakpoint(&outgoing) {
+                if let Some(hard) = target_mode {
+                    if mode != Some(hard) && apply_bp_mode(&state, &telnet, hard) {
+                        mode = Some(hard);
+                    }
+                }
+                if let Some(new_pkt) = rewritten {
                     trace_bp(
                         &state,
                         &format!(
-                            "{} -> {} 断点",
-                            String::from_utf8_lossy(&pkt[..pkt.len().saturating_sub(3)])
-                                .replace('\n', " "),
-                            if hard { "硬件" } else { "软件" }
+                            "{} -> 改用软件断点（FPB 不覆盖 0x2000_0000 以上）",
+                            String::from_utf8_lossy(&outgoing[..outgoing.len().saturating_sub(3)])
+                                .replace('\n', " ")
                         ),
                     );
+                    outgoing = new_pkt;
                 }
             }
-            if s_write.write_all(&pkt).is_err() {
+            if s_write.write_all(&outgoing).is_err() {
                 return;
             }
         }
