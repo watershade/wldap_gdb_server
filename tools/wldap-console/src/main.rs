@@ -13,7 +13,7 @@ use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -44,6 +44,8 @@ struct Config {
     target: String,
     speed: u32,
     gdb_port: u16,
+    /// OpenOCD debug level (-dN). 0 keeps the log readable; 3 is for diagnosis.
+    debug: u32,
 }
 
 impl Default for Config {
@@ -56,6 +58,7 @@ impl Default for Config {
             target: "stm32g4x".to_string(),
             speed: 1000,
             gdb_port: 3333,
+            debug: 0,
         }
     }
 }
@@ -81,6 +84,7 @@ impl Config {
                     "target" => cfg.target = v.trim().to_string(),
                     "speed" => cfg.speed = v.trim().parse().unwrap_or(cfg.speed),
                     "gdb_port" => cfg.gdb_port = v.trim().parse().unwrap_or(cfg.gdb_port),
+                    "debug" => cfg.debug = v.trim().parse().unwrap_or(cfg.debug),
                     _ => {}
                 }
             }
@@ -90,8 +94,8 @@ impl Config {
 
     fn save(&self, path: &Path) {
         let text = format!(
-            "# WLDAP Console settings\nhost={}\nport={}\nmode={}\nopenocd={}\ntarget={}\nspeed={}\ngdb_port={}\n",
-            self.host, self.port, self.mode, self.openocd, self.target, self.speed, self.gdb_port
+            "# WLDAP Console settings\nhost={}\nport={}\nmode={}\nopenocd={}\ntarget={}\nspeed={}\ngdb_port={}\ndebug={}\n",
+            self.host, self.port, self.mode, self.openocd, self.target, self.speed, self.gdb_port, self.debug
         );
         let _ = fs::write(path, text);
     }
@@ -119,6 +123,9 @@ struct State {
     cfg: Config,
     proxy: Arc<Proxy>,
     child: Option<Child>,
+    /// Linux pid of the OpenOCD started inside WSL (mode=wsl).
+    wsl_pid: Option<u32>,
+    last_alive: Option<Instant>,
     log: VecDeque<String>,
     test: Option<TestResult>,
     started: Option<Instant>,
@@ -134,6 +141,8 @@ impl State {
                 clients: AtomicU32::new(0),
             }),
             child: None,
+            wsl_pid: None,
+            last_alive: None,
             log: VecDeque::new(),
             test: None,
             started: None,
@@ -148,11 +157,14 @@ impl State {
     }
 
     fn running(&self) -> bool {
-        self.child.is_some()
+        self.child.is_some() || self.wsl_pid.is_some()
     }
 
     fn pid(&self) -> u32 {
-        self.child.as_ref().map(|c| c.id()).unwrap_or(0)
+        match &self.child {
+            Some(c) => c.id(),
+            None => self.wsl_pid.unwrap_or(0),
+        }
     }
 
     fn refresh(&mut self) {
@@ -164,6 +176,23 @@ impl State {
             self.push_log(format!("--- OpenOCD 已退出 ({}) ---", status));
             self.child = None;
             self.started = None;
+        }
+
+        // WSL mode: wsl.exe may exit while OpenOCD keeps running, so liveness is
+        // tracked by the Linux pid, not by the Windows child.
+        if let Some(pid) = self.wsl_pid {
+            let due = self
+                .last_alive
+                .map(|t| t.elapsed() >= Duration::from_secs(2))
+                .unwrap_or(true);
+            if due {
+                self.last_alive = Some(Instant::now());
+                if !wsl_alive(pid) {
+                    self.push_log("--- OpenOCD 已退出 ---".to_string());
+                    self.wsl_pid = None;
+                    self.started = None;
+                }
+            }
         }
     }
 }
@@ -309,17 +338,8 @@ fn handle(
 
         ("POST", "/api/stop") => {
             stop_proxy(&state);
-            {
-                let mut st = state.lock().unwrap();
-                st.child.take().map(|mut c| {
-                    let _ = c.kill();
-                    let _ = c.wait();
-                });
-                st.started = None;
-            }
-            stop_orphans();
             let mut st = state.lock().unwrap();
-            st.push_log("--- 已停止 OpenOCD ---".to_string());
+            stop_openocd(&mut st, &exe_dir);
             ("200 OK", "application/json", state_json(&st))
         }
 
@@ -653,11 +673,10 @@ adapter driver cmsis-dap\n\
 cmsis-dap backend tcp\n\
 cmsis-dap tcp host {}\n\
 cmsis-dap tcp port {}\n\
-cmsis-dap tcp min_timeout 300\n\
+cmsis-dap tcp min_timeout 500\n\
 transport select swd\n\
-adapter speed {}\n\
 gdb_port {}\n",
-        bind, cfg.host, cfg.port, cfg.speed, cfg.gdb_port
+        bind, cfg.host, cfg.port, cfg.gdb_port
     )
 }
 
@@ -670,100 +689,129 @@ fn start_openocd(state: &Arc<Mutex<State>>, exe_dir: &Path) -> Option<String> {
         st.cfg.clone()
     };
 
+    // Clear leftovers from a previous run: if the app was closed abruptly the
+    // WSL-side OpenOCD survives and would keep the probe (and the port) busy.
+    stop_orphans();
+
     let cfg_file = exe_dir.join("wldap-openocd.cfg");
     if let Err(e) = fs::write(&cfg_file, gen_cfg(&cfg)) {
         return Some(format!("写配置失败: {}", e));
     }
     let target = format!("target/{}.cfg", cfg.target);
-    let gdb_busy_before = gdb_status(cfg.gdb_port).0;
+    let dbg = if cfg.debug > 0 {
+        format!("-d{}", cfg.debug)
+    } else {
+        String::new()
+    };
 
-    let mut cmd;
-    let wsl_mode = cfg.mode == "wsl";
-
-    if wsl_mode {
+    if cfg.mode == "wsl" {
         let cfg_in_wsl = match win_to_wsl(&cfg_file) {
             Some(p) => p,
             None => return Some("程序目录不在盘符路径下，WSL 模式解析不了配置。".to_string()),
         };
         let log_file = exe_dir.join("openocd.log");
-        let log_in_wsl = match win_to_wsl(&log_file) {
-            Some(p) => p,
-            None => return Some("程序目录不在盘符路径下。".to_string()),
+        let pid_file = exe_dir.join("openocd.pid");
+        let (log_in_wsl, pid_in_wsl) = match (win_to_wsl(&log_file), win_to_wsl(&pid_file)) {
+            (Some(l), Some(p)) => (l, p),
+            _ => return Some("程序目录不在盘符路径下。".to_string()),
         };
         let bin = if cfg.openocd.starts_with('/') {
             cfg.openocd.clone()
         } else {
             "openocd".to_string()
         };
-        // Keep the WSL-side process in the foreground (exec) so wsl.exe lives as
-        // long as OpenOCD does. Only single quotes: wsl.exe forwards the command
-        // line verbatim, so embedded double quotes would arrive literally.
+        // $$ becomes OpenOCD's pid via exec, and is written to a file so the
+        // Windows side can check liveness even when wsl.exe detaches.
         let script = format!(
-            ": > '{}'; exec '{}' -f '{}' -f '{}' >> '{}' 2>&1",
-            log_in_wsl, bin, cfg_in_wsl, target, log_in_wsl
+            ": > '{}'; echo $$ > '{}'; exec '{}' {} -f '{}' -f '{}' -c 'adapter speed {}' >> '{}' 2>&1",
+            log_in_wsl, pid_in_wsl, bin, dbg, cfg_in_wsl, target, cfg.speed, log_in_wsl
         );
-        cmd = Command::new("wsl.exe");
+        let mut cmd = Command::new("wsl.exe");
         cmd.args(["-e", "sh", "-c", &script]);
         cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        cmd.current_dir(exe_dir);
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        if let Err(e) = cmd.spawn() {
+            return Some(format!("调用 wsl.exe 失败: {}", e));
+        }
+        thread::sleep(Duration::from_millis(700));
+
+        let pid = fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|t| t.trim().parse::<u32>().ok());
+
+        let mut st = state.lock().unwrap();
+        match pid {
+            Some(pid) => {
+                st.push_log(format!(
+                    "--- 启动 OpenOCD/WSL (pid {}, 目标 {}, {} kHz{}) ---",
+                    pid,
+                    cfg.target,
+                    cfg.speed,
+                    if cfg.debug > 0 { ", 调试日志" } else { "" }
+                ));
+                st.wsl_pid = Some(pid);
+                st.started = Some(Instant::now());
+                st.last_alive = Some(Instant::now());
+                drop(st);
+                if let Err(e) = start_proxy(state, cfg.gdb_port) {
+                    state
+                        .lock()
+                        .unwrap()
+                        .push_log(format!("端口转发启动失败: {}", e));
+                }
+                None
+            }
+            None => {
+                st.push_log("启动失败：拿不到 OpenOCD 的 pid，见日志".to_string());
+                Some("启动失败，见日志".to_string())
+            }
+        }
     } else {
         let bin = if cfg.openocd.trim().is_empty() {
             "openocd".to_string()
         } else {
             cfg.openocd.clone()
         };
-        cmd = Command::new(bin);
-        cmd.arg("-f").arg(&cfg_file).arg("-f").arg(&target);
+        let mut cmd = Command::new(bin);
+        if cfg.debug > 0 {
+            cmd.arg(format!("-d{}", cfg.debug));
+        }
+        cmd.arg("-f")
+            .arg(&cfg_file)
+            .arg("-f")
+            .arg(&target)
+            .arg("-c")
+            .arg(format!("adapter speed {}", cfg.speed));
+        cmd.current_dir(exe_dir);
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-    }
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
 
-    cmd.current_dir(exe_dir);
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
-    match cmd.spawn() {
-        Ok(mut child) => {
-            let pid = child.id();
-            if !wsl_mode {
+        match cmd.spawn() {
+            Ok(mut child) => {
+                let pid = child.id();
                 if let Some(out) = child.stdout.take() {
                     spawn_reader(out, Arc::clone(state));
                 }
                 if let Some(err) = child.stderr.take() {
                     spawn_reader(err, Arc::clone(state));
                 }
-            }
-            let mut st = state.lock().unwrap();
-            st.push_log(format!(
-                "--- 启动 OpenOCD (pid {}, 目标 {}, {} kHz) ---",
-                pid, cfg.target, cfg.speed
-            ));
-            if gdb_busy_before {
+                let mut st = state.lock().unwrap();
                 st.push_log(format!(
-                    "警告: GDB 端口 {} 启动前已被占用（常见于 WSL 残留转发）。\
-                     若 IDE 连不上，请换一个端口或执行 wsl --shutdown。",
-                    cfg.gdb_port
+                    "--- 启动 OpenOCD (pid {}, 目标 {}, {} kHz) ---",
+                    pid, cfg.target, cfg.speed
                 ));
+                st.child = Some(child);
+                st.started = Some(Instant::now());
+                None
             }
-            // Give the process a moment: if it died instantly (probe busy, bad
-            // config), do not advertise a listening GDB port.
-            thread::sleep(Duration::from_millis(400));
-            let start_proxy_now = wsl_mode && child.try_wait().ok().flatten().is_none();
-            st.child = Some(child);
-            st.started = Some(Instant::now());
-            drop(st);
-
-            if start_proxy_now {
-                let lock = Arc::clone(state);
-                let port = cfg.gdb_port;
-                if let Err(e) = start_proxy(&lock, port) {
-                    let mut st = lock.lock().unwrap();
-                    st.push_log(format!("端口转发启动失败: {}", e));
-                }
-            }
-            None
+            Err(e) => Some(format!("启动 OpenOCD 失败: {}", e)),
         }
-        Err(e) => Some(format!("启动 OpenOCD 失败: {}", e)),
     }
 }
 
@@ -825,28 +873,29 @@ fn start_proxy(state: &Arc<Mutex<State>>, listen_port: u16) -> Result<(), String
             clients.clients.fetch_add(1, Ordering::SeqCst);
             thread::spawn(move || {
                 if let Ok(server) = TcpStream::connect((target.as_str(), listen_port)) {
-                    let (mut c_read, mut c_write) = match (client.try_clone(), client.try_clone()) {
-                        (Ok(a), Ok(b)) => (a, b),
-                        _ => {
-                            drop(server);
-                            clients.clients.fetch_sub(1, Ordering::SeqCst);
-                            return;
-                        }
-                    };
-                    let mut s_write = match server.try_clone() {
-                        Ok(a) => a,
-                        Err(_) => {
-                            drop(server);
-                            clients.clients.fetch_sub(1, Ordering::SeqCst);
-                            return;
-                        }
-                    };
-                    let mut s_read = server;
-                    let up = thread::spawn(move || {
-                        let _ = std::io::copy(&mut c_read, &mut s_write);
-                    });
-                    let _ = std::io::copy(&mut s_read, &mut c_write);
-                    let _ = up.join();
+                    let clones = (
+                        client.try_clone(),
+                        client.try_clone(),
+                        server.try_clone(),
+                        server.try_clone(),
+                    );
+                    if let (Ok(mut c_read), Ok(mut c_write), Ok(mut s_read), Ok(mut s_write)) = clones
+                    {
+                        // Half-close both sides as soon as either direction ends.
+                        // OpenOCD allows a single GDB client, so a leaked
+                        // upstream socket would make the next reconnect fail
+                        // with "no more connections allowed".
+                        let up = thread::spawn(move || {
+                            let _ = std::io::copy(&mut c_read, &mut s_write);
+                            let _ = s_write.shutdown(Shutdown::Both);
+                            let _ = c_read.shutdown(Shutdown::Both);
+                        });
+                        let _ = std::io::copy(&mut s_read, &mut c_write);
+                        let _ = c_write.shutdown(Shutdown::Both);
+                        let _ = s_read.shutdown(Shutdown::Both);
+                        let _ = up.join();
+                    }
+                    let _ = server.shutdown(Shutdown::Both);
                 }
                 clients.clients.fetch_sub(1, Ordering::SeqCst);
             });
@@ -865,6 +914,55 @@ fn stop_proxy(state: &Arc<Mutex<State>>) {
     let port = state.lock().unwrap().cfg.gdb_port;
     // Wake the accept loop.
     let _ = TcpStream::connect(("127.0.0.1", port));
+}
+
+fn stop_openocd(st: &mut State, exe_dir: &Path) {
+    let mut stopped = false;
+    if let Some(mut child) = st.child.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+        stopped = true;
+    }
+    if let Some(pid) = st.wsl_pid.take() {
+        let pid_file = exe_dir.join("openocd.pid");
+        let rm = win_to_wsl(&pid_file).unwrap_or_default();
+        let script = format!("kill -9 {} 2>/dev/null; rm -f '{}' 2>/dev/null; true", pid, rm);
+        #[cfg(windows)]
+        {
+            let mut c = Command::new("wsl.exe");
+            c.args(["-e", "sh", "-c", &script]);
+            sanitize_cwd(&mut c);
+            c.creation_flags(CREATE_NO_WINDOW);
+            let _ = c.output();
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = script;
+        }
+        stopped = true;
+    }
+    stop_orphans();
+    st.started = None;
+    st.last_alive = None;
+    if stopped {
+        st.push_log("--- 已停止 OpenOCD ---".to_string());
+    }
+}
+
+fn wsl_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let mut c = Command::new("wsl.exe");
+        c.args(["-e", "sh", "-c", &format!("kill -0 {} 2>/dev/null", pid)]);
+        sanitize_cwd(&mut c);
+        c.creation_flags(CREATE_NO_WINDOW);
+        return c.output().map(|o| o.status.success()).unwrap_or(false);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 fn stop_orphans() {

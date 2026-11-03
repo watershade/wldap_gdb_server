@@ -320,6 +320,24 @@ cmsis_dap_tcp 1: JTAG/SWD, port 4441. GPIO (weakest): SWCLK=6 SWDIO=7 NRESET=5
 3. Download → 观察状态灯进入"批量传输"档
 4. 需要复位时用 nRESET（GPIO5），或 OpenOCD 的 `reset` 命令
 
+#### 用命令行代替点按钮（自动化 / 排障）
+
+IAR 每次启动调试会话都会在工程 `settings/` 下生成两份参数文件：
+`*.general.xcl`（处理器 DLL、驱动 DLL、`.out`、`--device_macro`、`--flash_loader`）
+和 `*.driver.xcl`（`--cpu`、`.ddf`、`--device`、`--drv_communication=TCPIP:...`）。
+把这两份直接喂给 `cspybat`，就等价于点了 Download，而且不弹窗、能拿退出码：
+
+```bash
+# 前置：面板已点「驱动 OpenOCD」（127.0.0.1:3335 在监听）
+./scripts/iar_download.sh
+```
+
+排障时它比 GUI 好用得多：错误原文（`Failed to load flash loader: ...`、
+`Flashloader encountered a HardFault exception`）会直接打到终端，
+配合 OpenOCD 的 `-d3` 日志可以逐包对上。
+
+> 若 `settings/*.xcl` 不存在，先在 IAR 里启动一次调试会话重新生成。
+
 ### 4.6 更新 C5 自身的固件
 
 改完代码后重复第 2 步即可。因为配了 `--auto-attach`，**不需要拔插 USB**：
@@ -347,6 +365,9 @@ WiFi 凭据存在 NVS，重新烧写 `app` 不会丢；只有 `erase-flash` 才�
 | `command mismatch` | WiFi RTT 抖动 / 超时太短 | `min_timeout` 改 500；靠近 AP；优先 5 GHz |
 | 烧写成功但灯不闪 | 可能仍停在 BOOT 下载模式 | 松开 BOOT 按 RST |
 | WiFi 连上后频繁重启 | 服务启动后掉线会主动 reboot（设计如此） | 改善信号/功耗设置 |
+| IAR 报 `Failed to load flash loader: ...FlashSTM32G47xxx.flash` | IAR 设备宏 `STM32G4xx.dmac` 用 `"AP0_Memory"` zone，GDB Server 驱动不认，`execUserFlashInit` 直接 `Operation error` | 把 `<IAR>\arm\config\debugger\ST\STM32G4xx.dmac` 里的 `"AP0_Memory"` 全替换成 `"Memory"`（先备份） |
+| 同上，但 OpenOCD 日志里一个写包都没有 | 宏在本地就被拒了，包根本没发出来 | 同上；用 `scripts/iar_download.sh` 能直接看到 `STM32G4xx.dmac(85,34): Error: Operation error` |
+| IAR 报 `Flashloader encountered a HardFault exception` | loader 已在芯片里运行但异常 | 先 `reset halt` 清掉残留的软件断点/RAM 改写；再看 `CFSR`（`0x1` = 取指访问违例，通常是跳到外设地址） |
 
 ---
 
