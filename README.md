@@ -42,9 +42,10 @@ ARM CMSIS-DAP 固件  →  bkuschak/cmsis_dap_tcp_esp32  →  watershade/wldap_g
 | `.vscode/launch.json` | 新增 | 用 ESP-IDF 扩展调试 C5 自身固件（内置 USB-JTAG） |
 | `.vscode/settings.json` | 新增 | 指定 buildPath、OpenOCD 板级配置、clangd |
 | `.clangd` | 新增 | 去掉不适用于交叉编译的 `-f*` / `-m*` 参数 |
+| `main/idf_component.yml` | 修改 | 增加 `idf: ">=6.0,<7.0"` 约束，超出范围时组件管理器在解析阶段直接报错 |
 | `README.md` | 修改 | 本文件；上游原文见链接 |
 
-**没有改动 `main/` 下的任何源码。** 协议解析、SWD 位操作、WiFi、UART bridge 全部是上游与 ARM 的原样代码，版权头保留在各自文件里。C5 的适配完全通过 Kconfig / sdkconfig 完成，这也是上游支持新板子的既定方式（preset + sdkconfig）。
+**没有改动 `main/` 下的任何 C 源码。** 唯一的 `main/` 改动是 `main/idf_component.yml` 里的 IDF 版本约束。协议解析、SWD 位操作、WiFi、UART bridge 全部是上游与 ARM 的原样代码，版权头保留在各自文件里。C5 的适配完全通过 Kconfig / sdkconfig 完成，这也是上游支持新板子的既定方式（preset + sdkconfig）。
 
 ## 硬件
 
@@ -65,7 +66,16 @@ ARM CMSIS-DAP 固件  →  bkuschak/cmsis_dap_tcp_esp32  →  watershade/wldap_g
 
 ## 构建
 
-需要 ESP-IDF。本仓库在 **ESP-IDF v6.1** 上验证，上游在 v6.0.2 上验证。
+需要 ESP-IDF。版本范围由 `main/idf_component.yml` 约束：
+
+```yaml
+idf:
+  version: ">=6.0,<7.0"
+```
+
+IDF 7.0 预期会有 API 变更，尚未适配；到 7.0 正式发布后再放宽这个范围并重新验证。版本不匹配时，组件管理器会在依赖解析阶段直接失败，不会等到编译中途才报错。
+
+已验证版本：**ESP-IDF v6.1.0**（本仓库）、上游声明 v6.0.2。
 
 ```bash
 # 激活 ESP-IDF

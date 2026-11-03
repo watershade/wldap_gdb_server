@@ -24,10 +24,11 @@ Added:
 
 Modified:
   CMakePresets.json              added the board_esp32c5_mini configure preset
+  main/idf_component.yml         added idf version constraint ">=6.0,<7.0"
   README.md                      replaced with a WLDAP-specific description of
                                  this fork and its relationship to upstream
 
-No source file under main/ was modified. Protocol handling, SWD bit-banging,
+No C source file under main/ was modified. Protocol handling, SWD bit-banging,
 WiFi, and UART bridge code remain as received from upstream.
 
 The ESP32-C5 target support is implemented entirely through Kconfig values in

@@ -1,4 +1,8 @@
 dependencies:
+  # Pin the ESP-IDF range. 6.x is the validated line; 7.0 is expected to change
+  # APIs and must be re-validated before this constraint is widened.
+  idf:
+    version: ">=6.0,<7.0"
   # Support for WS2812 RGB LED on some boards.
   espressif/led_strip:
     version: "^3.0.3"
