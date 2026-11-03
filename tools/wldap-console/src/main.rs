@@ -676,10 +676,12 @@ cmsis-dap tcp port {}\n\
 cmsis-dap tcp min_timeout 500\n\
 transport select swd\n\
 gdb port {}\n\
-# IDE 通常用 Z0（软件断点）请求，但目标代码在 flash 里，OpenOCD 无法真正
-# 把 0xBE00 打进 flash，断点静默失效 —— 表现为“停在不了 main”“复位后停不下”.
-# 强制用硬件断点：G474 有 6 个比较器，够用。
-gdb_breakpoint_override hard\n",
+# 默认全用硬件比较器：IDE 发 Z0（软件断点）时 OpenOCD 写不进 flash，断点会
+# 静默失效，表现为“停不到 main”“复位后停不下来”.
+# 例外在 WLDAP Console 的代理里逐包处理：下载阶段 IDE 会在 RAM 里运行的 flash
+# loader 上下断点，Cortex-M4 的 FPB rev1 只在 0x1FFF_FFFF 以下比较，这类包
+# 到达前代理会把模式临时切成 soft，否则加载器断点加不上、IDE 卡在“进入调试”.
+gdb breakpoint_override hard\n",
         bind, cfg.host, cfg.port, cfg.gdb_port
     )
 }
@@ -842,6 +844,169 @@ fn wsl_ip() -> Option<String> {
 }
 
 /// Forward 127.0.0.1:<listen> to <wsl_ip>:<listen>.
+/// 断点包追踪：同时写面板日志和 proxy.log，排障时用。
+fn trace_bp(state: &Arc<Mutex<State>>, msg: &str) {
+    state.lock().unwrap().push_log(msg.to_string());
+    if let Ok(mut f) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(r"D:\Dev\WLDAP-Console\wldap-proxy.log")
+    {
+        let _ = writeln!(f, "{}", msg);
+    }
+}
+
+/// GDB 断点必须按地址选类型，不能一刀切：
+///  - flash 里的应用代码：IDE 发 `Z0`（软件断点），OpenOCD 写不进 flash，
+///    断点静默失效 → “停不到 main”“复位后停不下来”；
+///  - RAM 里跑 flash loader 时下的断点：Cortex-M4 的 FPB rev1 只能在
+///    0x1FFF_FFFF 以下比较，强制硬件会让 0x2000_xxxx 断点直接失败，
+///    IDE 于是卡死在“进入调试”。
+/// 返回 Some(true)=用硬件比较器，Some(false)=用软件断点。
+fn bp_mode_for_packet(pkt: &[u8]) -> Option<bool> {
+    if pkt.len() < 7 || pkt[0] != b'$' || pkt[1] != b'Z' {
+        return None;
+    }
+    let t = pkt[2];
+    if t != b'0' && t != b'1' {
+        return None; // Z2..Z4 是 watchpoint，本来就只在硬件里
+    }
+    // 包体是 Z<类型>,<地址>,<长度>#<校验>，地址从逗号之后开始
+    if pkt[3] != b',' {
+        return None;
+    }
+    let body = std::str::from_utf8(&pkt[4..]).ok()?;
+    let addr_s = body.split(',').next()?;
+    let addr = u64::from_str_radix(addr_s, 16).ok()?;
+    Some(addr < 0x2000_0000)
+}
+
+/// 通过 telnet 改 OpenOCD 的断点覆盖模式，并等它回提示符，确保下一条
+/// GDB 包到达时新模式已经生效。
+fn apply_bp_mode(state: &Arc<Mutex<State>>, telnet: &str, hard: bool) -> bool {
+    let Ok(mut s) = TcpStream::connect(telnet) else {
+        state.lock().unwrap().push_log("GDB 代理：连不上 OpenOCD 的 telnet 4444".to_string());
+        return false;
+    };
+    let _ = s.set_read_timeout(Some(Duration::from_millis(150)));
+    let _ = s.set_write_timeout(Some(Duration::from_millis(800)));
+    let mut buf = [0u8; 256];
+    // 读超时一律当“还没到”，用总截止时间兜底，避免把正常的分段/慢启动判成失败
+    let mut wait_prompt = |s: &mut TcpStream| -> bool {
+        let deadline = Instant::now() + Duration::from_millis(2500);
+        loop {
+            if Instant::now() > deadline {
+                return false;
+            }
+            match s.read(&mut buf) {
+                Ok(0) => return false,
+                Ok(n) => {
+                    if buf[..n].contains(&b'>') {
+                        return true;
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+    };
+    if !wait_prompt(&mut s) {
+        state.lock().unwrap().push_log("GDB 代理：没等到 OpenOCD 提示符".to_string());
+        return false;
+    }
+    let cmd = if hard {
+        "gdb breakpoint_override hard\n"
+    } else {
+        "gdb breakpoint_override soft\n"
+    };
+    if s.write_all(cmd.as_bytes()).is_err() {
+        state.lock().unwrap().push_log("GDB 代理：断点模式命令没发出去".to_string());
+        return false;
+    }
+    let ok = wait_prompt(&mut s);
+    if !ok {
+        state.lock().unwrap().push_log("GDB 代理：断点模式切换未确认".to_string());
+    }
+    let _ = s.shutdown(Shutdown::Both);
+    ok
+}
+
+/// IDE → OpenOCD 方向：整包转发，但在断点包之前先把模式调对。
+fn pump_upstream(
+    mut c_read: TcpStream,
+    mut s_write: TcpStream,
+    telnet: String,
+    state: Arc<Mutex<State>>,
+) {
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 4096];
+    // 配置里的初始值是 hard
+    let mut mode: Option<bool> = Some(true);
+    loop {
+        let n = match c_read.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        pending.extend_from_slice(&buf[..n]);
+        loop {
+            let Some(start) = pending.iter().position(|&b| b == b'$') else {
+                if s_write.write_all(&pending).is_err() {
+                    return;
+                }
+                pending.clear();
+                break;
+            };
+            if start > 0 {
+                if s_write.write_all(&pending[..start]).is_err() {
+                    return;
+                }
+                pending.drain(..start);
+            }
+            // 包尾是 '#' + 两位校验；正文里的 '#' 会被 '}' 转义
+            let mut esc = false;
+            let mut end = None;
+            for (i, &b) in pending.iter().enumerate().skip(1) {
+                if esc {
+                    esc = false;
+                    continue;
+                }
+                if b == b'}' {
+                    esc = true;
+                    continue;
+                }
+                if b == b'#' {
+                    end = Some(i);
+                    break;
+                }
+            }
+            let Some(i) = end else { break };
+            if pending.len() < i + 3 {
+                break;
+            }
+            let pkt: Vec<u8> = pending.drain(..i + 3).collect();
+            if let Some(hard) = bp_mode_for_packet(&pkt) {
+                if mode != Some(hard) && apply_bp_mode(&state, &telnet, hard) {
+                    mode = Some(hard);
+                    trace_bp(
+                        &state,
+                        &format!(
+                            "{} -> {} 断点",
+                            String::from_utf8_lossy(&pkt[..pkt.len().saturating_sub(3)])
+                                .replace('\n', " "),
+                            if hard { "硬件" } else { "软件" }
+                        ),
+                    );
+                }
+            }
+            if s_write.write_all(&pkt).is_err() {
+                return;
+            }
+        }
+    }
+    let _ = s_write.shutdown(Shutdown::Both);
+    let _ = c_read.shutdown(Shutdown::Both);
+}
+
 fn start_proxy(state: &Arc<Mutex<State>>, listen_port: u16) -> Result<(), String> {
     let ip = wsl_ip().ok_or_else(|| "拿不到 WSL 的 IP".to_string())?;
     let proxy = Arc::clone(&state.lock().unwrap().proxy);
@@ -861,6 +1026,7 @@ fn start_proxy(state: &Arc<Mutex<State>>, listen_port: u16) -> Result<(), String
 
     let stop = Arc::clone(&proxy);
     let clients = Arc::clone(&proxy);
+    let proxy_state = Arc::clone(state);
     let target = ip.clone();
 
     thread::spawn(move || {
@@ -875,6 +1041,8 @@ fn start_proxy(state: &Arc<Mutex<State>>, listen_port: u16) -> Result<(), String
             let clients = Arc::clone(&clients);
             let target = target.clone();
             clients.clients.fetch_add(1, Ordering::SeqCst);
+            let target_for_pump = target.clone();
+            let state_shared = Arc::clone(&proxy_state);
             thread::spawn(move || {
                 if let Ok(server) = TcpStream::connect((target.as_str(), listen_port)) {
                     let clones = (
@@ -889,10 +1057,10 @@ fn start_proxy(state: &Arc<Mutex<State>>, listen_port: u16) -> Result<(), String
                         // OpenOCD allows a single GDB client, so a leaked
                         // upstream socket would make the next reconnect fail
                         // with "no more connections allowed".
+                        let telnet = format!("{}:4444", target_for_pump);
+                        let pump_state = Arc::clone(&state_shared);
                         let up = thread::spawn(move || {
-                            let _ = std::io::copy(&mut c_read, &mut s_write);
-                            let _ = s_write.shutdown(Shutdown::Both);
-                            let _ = c_read.shutdown(Shutdown::Both);
+                            pump_upstream(c_read, s_write, telnet, pump_state);
                         });
                         let _ = std::io::copy(&mut s_read, &mut c_write);
                         let _ = c_write.shutdown(Shutdown::Both);
