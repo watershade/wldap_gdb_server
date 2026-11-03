@@ -15,6 +15,8 @@ ESP32-C5-MINI（本仓库固件）
 目标 MCU
 ```
 
+> **使用指导**：烧写 / 调试 / 烧写之后怎么用，见 [docs/usage-guide.md](docs/usage-guide.md)。
+
 ## 来源与继承
 
 本仓库是 **[bkuschak/cmsis_dap_tcp_esp32](https://github.com/bkuschak/cmsis_dap_tcp_esp32)** 的 fork，遵循 Apache License 2.0。
