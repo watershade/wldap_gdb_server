@@ -1,5 +1,5 @@
 {
-    "idf.currentSetup": "/mnt/d/espressif/v6.1/esp-idf",
+    "idf.currentSetup": "/home/john/.espressif/v6.1/esp-idf",
     "idf.buildPath": "build/build_esp32c5_mini",
     "idf.openOcdConfigs": [
       "board/esp32c5-builtin.cfg"

@@ -27,30 +27,22 @@ ESP32-C5-MINI
 
 ## 构建
 
-WSL 里使用 IDF 6.1：
+WSL 里使用 IDF 6.1，直接用脚本（自动带 preset）：
 
 ```bash
-source /home/john/.espressif/tools/activate_idf_v6.1.sh
-
-cd /mnt/e/Projects/WLDAP/WLDAP_GDB
-
-BUILD_DIR="$HOME/wldap-build-c5"
-idf.py -B "$BUILD_DIR" \
-  -DIDF_TARGET=esp32c5 \
-  -DSDKCONFIG="$BUILD_DIR/sdkconfig" \
-  -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.board_esp32c5_mini" \
-  build
+cd ~/Workspace/WLDAP/wldap_gdb_server
+./scripts/build_wldap.sh
 ```
 
 烧写：
 
 ```bash
-idf.py -B "$HOME/wldap-build-c5" -p /dev/ttyACM0 flash monitor
+PORT=/dev/ttyACM0 ./scripts/flash_wldap.sh
 ```
 
 > WSL 里先把 C5 的 USB Serial/JTAG 通过 usbipd-win 直通进来；设备一般是 `/dev/ttyACM0`。
 
-> 如果构建很慢，把项目复制到 `$HOME` 下再构建；`/mnt/e` 源码 + `/mnt/d` IDF 会让并行编译卡在 9p I/O。构建目录用 `$HOME/wldap-build-c5`，不要放在 `/mnt/e`。
+> 如果构建很慢，把项目复制到 `$HOME` 下再构建；`/mnt/e` 源码 + `/mnt/d` IDF 会让并行编译卡在 9p I/O。
 
 ## WiFi 配置
 
