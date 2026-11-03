@@ -675,7 +675,11 @@ cmsis-dap tcp host {}\n\
 cmsis-dap tcp port {}\n\
 cmsis-dap tcp min_timeout 500\n\
 transport select swd\n\
-gdb_port {}\n",
+gdb port {}\n\
+# IDE 通常用 Z0（软件断点）请求，但目标代码在 flash 里，OpenOCD 无法真正
+# 把 0xBE00 打进 flash，断点静默失效 —— 表现为“停在不了 main”“复位后停不下”.
+# 强制用硬件断点：G474 有 6 个比较器，够用。
+gdb_breakpoint_override hard\n",
         bind, cfg.host, cfg.port, cfg.gdb_port
     )
 }
