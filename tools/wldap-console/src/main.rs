@@ -676,12 +676,7 @@ cmsis-dap tcp port {}\n\
 cmsis-dap tcp min_timeout 500\n\
 transport select swd\n\
 gdb port {}\n\
-# 默认全用硬件比较器：IDE 发 Z0（软件断点）时 OpenOCD 写不进 flash，断点会
-# 静默失效，表现为“停不到 main”“复位后停不下来”.
-# 例外在 WLDAP Console 的代理里逐包处理：下载阶段 IDE 会在 RAM 里运行的 flash
-# loader 上下断点，Cortex-M4 的 FPB rev1 只在 0x1FFF_FFFF 以下比较，这类包
-# 到达前代理会把模式临时切成 soft，否则加载器断点加不上、IDE 卡在“进入调试”.
-gdb breakpoint_override hard\n",
+gdb breakpoint_override disable\n",
         bind, cfg.host, cfg.port, cfg.gdb_port
     )
 }
@@ -856,117 +851,53 @@ fn trace_bp(state: &Arc<Mutex<State>>, msg: &str) {
     }
 }
 
-/// 断点包决定要不要动，以及怎么动。
-/// 返回 None 表示原样转发；Some((hard, 替换包)) 表示先把覆盖模式设成 hard/soft
-/// （None 表示不用改模式），并且可能把包改写后再发。
+/// 断点包按地址选实现方式，直接在协议层改写，不动 OpenOCD 的全局状态。
 ///
-/// 两条铁律，都来自芯片而不是偏好：
-///  - Cortex-M 的 FPB 比较器只在代码区 0x0000_0000–0x1FFF_FFFF 有效，所以
-///    对 RAM（如 flash loader 所在的 0x2000_xxxx）的硬件断点请求根本做不到，
-///    只能改成软件断点（0xBE00 打进 RAM，合法且可靠）；
-///  - 反过来，软件断点需要写目标内存，flash 写不进去，所以 flash 里的软件
-///    断点请求只能交给硬件比较器。
-/// 除此之外一律照 IDE 的意思办。
-fn decide_breakpoint(pkt: &[u8]) -> Option<(Option<bool>, Option<Vec<u8>>)> {
-    if pkt.len() < 8 || pkt[0] != b'$' || pkt[1] != b'Z' || pkt[3] != b',' {
+/// 两条铁律来自芯片：
+///  - Cortex-M 的 FPB 比较器只覆盖 0x0000_0000–0x1FFF_FFFF（代码区）。对 RAM
+///    （flash loader 就跑在 0x2000_xxxx）的硬件断点请求物理上办不到，只能改写
+///    成软件断点（0xBE00 写进 RAM 合法且可靠）；
+///  - 软件断点要写目标内存，flash 写不进去。所以 flash 里的软件断点请求只能
+///    改写成硬件断点（G474 有 6 个比较器）。
+/// 其余包一律原样转发，IDE 想怎么用就怎么用。
+///
+/// 注意 `gdb breakpoint_override` 是全局且粘滞的：一旦被设成 soft，之后 IDE
+/// 发的 Z1 也会被 OpenOCD 当软件断点塞进 flash（写不进去、静默失效），表现
+/// 就是“停不到 main、复位后停不下来”。所以这里不用它，逐包改写。
+fn rewrite_breakpoint(pkt: &[u8]) -> Option<Vec<u8>> {
+    if pkt.len() < 8 || pkt[0] != b'$' || !matches!(pkt[1], b'Z' | b'z') || pkt[3] != b',' {
         return None;
     }
     let kind = pkt[2];
     if kind != b'0' && kind != b'1' {
-        return None; // watchpoint 之类，不从这里走
+        return None; // watchpoint（2/3/4）不碰
     }
     let body = std::str::from_utf8(&pkt[4..]).ok()?;
-    let addr_s = body.split(',').next()?;
-    let addr = u64::from_str_radix(addr_s, 16).ok()?;
-
-    if addr >= 0x2000_0000 {
-        // 代码区之外：硬件比较器覆盖不到，必须用软件断点
-        if kind == b'1' {
-            return Some((Some(false), Some(rewrite_to_software(pkt))));
-        }
-        return Some((Some(false), None));
+    let addr = u64::from_str_radix(body.split(',').next()?, 16).ok()?;
+    let want = if addr >= 0x2000_0000 { b'0' } else { b'1' };
+    if want == kind {
+        return None;
     }
-    // 代码区（flash）：软件断点写不进去，交给硬件比较器
-    if kind == b'0' {
-        return Some((Some(true), None));
-    }
-    None
-}
-
-/// 把 `$Z1,<地址>,<长度>#xx` 改写成 `$Z0,...#xx`（重算校验和）。
-fn rewrite_to_software(pkt: &[u8]) -> Vec<u8> {
     let hash = pkt.len() - 3;
     let mut out = Vec::with_capacity(pkt.len());
     out.push(b'$');
-    out.push(b'Z');
-    out.push(b'0');
+    out.push(pkt[1]);
+    out.push(want);
     out.extend_from_slice(&pkt[4..hash]);
     let ck = out[1..].iter().fold(0u8, |a, &b| a.wrapping_add(b));
     out.push(b'#');
     out.extend_from_slice(format!("{:02x}", ck).as_bytes());
-    out
+    Some(out)
 }
-
-/// 通过 telnet 改 OpenOCD 的断点覆盖模式，并等它回提示符，确保下一条
-/// GDB 包到达时新模式已经生效。
-fn apply_bp_mode(state: &Arc<Mutex<State>>, telnet: &str, hard: bool) -> bool {
-    let Ok(mut s) = TcpStream::connect(telnet) else {
-        state.lock().unwrap().push_log("GDB 代理：连不上 OpenOCD 的 telnet 4444".to_string());
-        return false;
-    };
-    let _ = s.set_read_timeout(Some(Duration::from_millis(150)));
-    let _ = s.set_write_timeout(Some(Duration::from_millis(800)));
-    let mut buf = [0u8; 256];
-    // 读超时一律当“还没到”，用总截止时间兜底，避免把正常的分段/慢启动判成失败
-    let mut wait_prompt = |s: &mut TcpStream| -> bool {
-        let deadline = Instant::now() + Duration::from_millis(2500);
-        loop {
-            if Instant::now() > deadline {
-                return false;
-            }
-            match s.read(&mut buf) {
-                Ok(0) => return false,
-                Ok(n) => {
-                    if buf[..n].contains(&b'>') {
-                        return true;
-                    }
-                }
-                Err(_) => continue,
-            }
-        }
-    };
-    if !wait_prompt(&mut s) {
-        state.lock().unwrap().push_log("GDB 代理：没等到 OpenOCD 提示符".to_string());
-        return false;
-    }
-    let cmd = if hard {
-        "gdb breakpoint_override hard\n"
-    } else {
-        "gdb breakpoint_override soft\n"
-    };
-    if s.write_all(cmd.as_bytes()).is_err() {
-        state.lock().unwrap().push_log("GDB 代理：断点模式命令没发出去".to_string());
-        return false;
-    }
-    let ok = wait_prompt(&mut s);
-    if !ok {
-        state.lock().unwrap().push_log("GDB 代理：断点模式切换未确认".to_string());
-    }
-    let _ = s.shutdown(Shutdown::Both);
-    ok
-}
-
 /// IDE → OpenOCD 方向：整包转发，但在断点包之前先把模式调对。
 fn pump_upstream(
     mut c_read: TcpStream,
     mut s_write: TcpStream,
-    telnet: String,
+    _telnet: String,
     state: Arc<Mutex<State>>,
 ) {
     let mut pending: Vec<u8> = Vec::new();
     let mut buf = [0u8; 4096];
-    // 配置里的初始值是 hard
-    let mut mode: Option<bool> = Some(true);
     loop {
         let n = match c_read.read(&mut buf) {
             Ok(0) => break,
@@ -1010,25 +941,21 @@ fn pump_upstream(
                 break;
             }
             let pkt: Vec<u8> = pending.drain(..i + 3).collect();
-            let mut outgoing = pkt;
-            if let Some((target_mode, rewritten)) = decide_breakpoint(&outgoing) {
-                if let Some(hard) = target_mode {
-                    if mode != Some(hard) && apply_bp_mode(&state, &telnet, hard) {
-                        mode = Some(hard);
-                    }
-                }
-                if let Some(new_pkt) = rewritten {
+            let outgoing = match rewrite_breakpoint(&pkt) {
+                Some(new_pkt) => {
                     trace_bp(
                         &state,
                         &format!(
-                            "{} -> 改用软件断点（FPB 不覆盖 0x2000_0000 以上）",
-                            String::from_utf8_lossy(&outgoing[..outgoing.len().saturating_sub(3)])
-                                .replace('\n', " ")
+                            "{} -> {}",
+                            String::from_utf8_lossy(&pkt[..pkt.len().saturating_sub(3)])
+                                .replace('\n', " "),
+                            if new_pkt[2] == b'1' { "硬件断点" } else { "软件断点" }
                         ),
                     );
-                    outgoing = new_pkt;
+                    new_pkt
                 }
-            }
+                None => pkt,
+            };
             if s_write.write_all(&outgoing).is_err() {
                 return;
             }
