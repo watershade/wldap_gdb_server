@@ -140,6 +140,17 @@ monitor 退出：`Ctrl+]`（**不是** `Ctrl+C`）。
 
 ---
 
+## 2.5 图形化工具（不想碰命令行）
+
+`tools/wldap-console` 是一个 Windows 桌面小工具（单个 exe，本地网页界面）：
+
+双击 → 浏览器打开面板 → 填探针 IP → “测试” → 选目标芯片 → “启动 OpenOCD” → IAR 连 `127.0.0.1:3333`。
+
+它能自动找到 OpenOCD（本机或 WSL 里的），并在界面上显示“探针在线 / OpenOCD 运行中 / IDE 已连接”三个状态。
+细节见 [tools/wldap-console/README.md](../tools/wldap-console/README.md)。
+
+> 注意：如果提示 3333 端口被占用，是旧 WSL 会话残留的端口转发，`wsl --shutdown` 或换 3334。
+
 ## 3. 调试
 
 ### 3.1 调试 C5 自身固件（开发 WLDAP 固件时用）

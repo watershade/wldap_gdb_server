@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>WLDAP Console</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#0f1115; --card:#171a21; --line:#262b36; --fg:#e6e9ef;
+    --dim:#8b94a7; --ok:#31c48d; --warn:#f0b429; --bad:#ef5350; --accent:#4c8dff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  header{padding:18px 24px;border-bottom:1px solid var(--line);
+         display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+  h1{font-size:17px;margin:0;font-weight:600;letter-spacing:.2px}
+  .sub{color:var(--dim);font-size:12px}
+  .pills{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
+  .pill{display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;
+        background:#1d222c;border:1px solid var(--line);font-size:12px;color:var(--dim)}
+  .dot{width:8px;height:8px;border-radius:50%;background:#3a4150}
+  .dot.ok{background:var(--ok);box-shadow:0 0 8px rgba(49,196,141,.6)}
+  .dot.bad{background:var(--bad)}
+  .dot.warn{background:var(--warn)}
+  main{max-width:1080px;margin:0 auto;padding:20px 24px 60px;
+       display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:900px){main{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .card h2{font-size:13px;margin:0 0 12px;color:var(--dim);font-weight:600;
+           text-transform:uppercase;letter-spacing:.6px}
+  .row{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+  label{color:var(--dim);font-size:12px;min-width:78px}
+  input,select{background:#0d1014;border:1px solid var(--line);color:var(--fg);
+        border-radius:8px;padding:7px 9px;font:13px/1.2 inherit;outline:none}
+  input:focus,select:focus{border-color:var(--accent)}
+  input.wide{flex:1;min-width:220px}
+  button{background:var(--accent);border:0;color:#fff;border-radius:8px;
+         padding:8px 14px;font:13px/1 inherit;cursor:pointer}
+  button.ghost{background:#232a36;color:var(--fg)}
+  button.bad{background:#3a2426;color:#ffb4b4;border:1px solid #5a3033}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .result{margin-top:10px;padding:10px 12px;border-radius:8px;font-size:13px;
+          border:1px solid var(--line);background:#12151b;color:var(--dim)}
+  .result.ok{border-color:#1f5a44;background:#10231c;color:#8ef0c4}
+  .result.bad{border-color:#5a3033;background:#231416;color:#ffb4b4}
+  .log{height:210px;overflow:auto;background:#0b0d11;border:1px solid var(--line);
+       border-radius:8px;padding:10px;font:12px/1.45 ui-monospace,Consolas,monospace;
+       color:#a9b4c7;white-space:pre-wrap;word-break:break-all}
+  .hint{color:var(--dim);font-size:12px;margin-top:8px}
+  .full{grid-column:1/-1}
+  code{background:#222835;padding:1px 5px;border-radius:4px;font-size:12px}
+  .found{font:12px ui-monospace,Consolas,monospace;color:#a9b4c7}
+  .badge{font-size:11px;padding:1px 7px;border-radius:999px;background:#232a36;color:var(--dim)}
+  .steps{margin:0;padding-left:18px;color:var(--dim);font-size:12.5px}
+  .steps li{margin:4px 0}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<header>
+  <h1>WLDAP Console</h1>
+  <span class="sub">无线 CMSIS-DAP 探针 · 配置与自检</span>
+  <div class="pills">
+    <div class="pill"><span id="dOcd" class="dot"></span><span id="tOcd">OpenOCD 未运行</span></div>
+    <div class="pill"><span id="dProbe" class="dot"></span><span id="tProbe">探针未测试</span></div>
+    <div class="pill"><span id="dIde" class="dot"></span><span id="tIde">IDE 未连接</span></div>
+  </div>
+</header>
+
+<main>
+  <section class="card">
+    <h2>1 · 连接探针</h2>
+    <div class="row">
+      <label>IP 地址</label>
+      <input id="host" class="wide" placeholder="192.168.0.102">
+    </div>
+    <div class="row">
+      <label>端口</label>
+      <input id="port" style="width:90px" placeholder="4441">
+      <span class="hint">CMSIS-DAP over TCP，默认 4441</span>
+    </div>
+    <div class="row">
+      <button onclick="saveAndTest()">保存并测试</button>
+      <button class="ghost" onclick="saveCfg()">仅保存</button>
+    </div>
+    <div id="testBox" class="result">尚未测试。先给探针上电，等它连上 WiFi。</div>
+    <p class="hint">测试只做一次 TCP 连接：能连上说明探针固件、WiFi、路由都通了。</p>
+  </section>
+
+  <section class="card">
+    <h2>2 · OpenOCD</h2>
+    <div class="row">
+      <label>运行方式</label>
+      <select id="mode">
+        <option value="wsl">WSL 里的 OpenOCD</option>
+        <option value="exe">本机 openocd.exe</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>OpenOCD</label>
+      <input id="openocd" class="wide" placeholder="留空 = 自动（WSL 用 ~/.espressif 里的版本）">
+    </div>
+    <div class="row">
+      <label>目标芯片</label>
+      <select id="target">
+        <option value="stm32g4x">STM32G4 系列</option>
+        <option value="stm32f1x">STM32F1 系列</option>
+        <option value="stm32f4x">STM32F4 系列</option>
+        <option value="stm32l4x">STM32L4 系列</option>
+        <option value="stm32h7x">STM32H7 系列</option>
+        <option value="nrf52">nRF52</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>SWCLK</label>
+      <input id="speed" style="width:100px" placeholder="1000">
+      <span class="hint">kHz，先 1000，稳了再往上</span>
+      <label style="min-width:auto;margin-left:12px">GDB 端口</label>
+      <input id="gdb" style="width:90px" placeholder="3333">
+    </div>
+    <div class="row">
+      <button id="btnStart" onclick="startOcd()">启动 OpenOCD</button>
+      <button class="bad" id="btnStop" onclick="stopOcd()">停止</button>
+      <span id="pidLine" class="hint"></span>
+    </div>
+    <div id="log" class="log"></div>
+  </section>
+
+  <section class="card">
+    <h2>3 · 环境检查</h2>
+    <div class="row">
+      <button class="ghost" onclick="detect()">重新检测 OpenOCD</button>
+      <a href="https://github.com/xpack-dev-tools/openocd-xpack/releases" target="_blank"
+         style="font-size:12px">没有？下载 Windows 版</a>
+    </div>
+    <div id="found" class="found">未检测。</div>
+    <p class="hint">
+      检测顺序：程序目录下的 <code>tools\openocd\bin\openocd.exe</code> → 系统 PATH →
+      Program Files / 用户目录 → WSL。找到 WSL 版本时会标成 <span class="badge">wsl</span>。
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>4 · 接下来做什么</h2>
+    <ol class="steps">
+      <li>给探针上电，等状态灯变成「每 2 秒短闪」。</li>
+      <li>点「保存并测试」，看到绿色 = 探针在线。</li>
+      <li>接好 SWCLK / SWDIO / nRESET / GND，目标板自己供电。</li>
+      <li>选目标芯片，点「启动 OpenOCD」，等日志出现 <code>Listening on port 3333</code>。</li>
+      <li>在 IAR 里把 GDB Server 地址填 <code>127.0.0.1:3333</code>（<b>不是</b>探针的 IP）。</li>
+      <li>IAR 连上后，右上角「IDE 已连接」会变绿。</li>
+    </ol>
+    <p class="hint">OpenOCD 必须一直开着。关掉本窗口会同时结束它。</p>
+  </section>
+</main>
+
+<script>
+let first = true;
+let lastOcdRunning = null;
+
+function q(id){ return document.getElementById(id); }
+
+function params(extra){
+  const p = new URLSearchParams({
+    host: q('host').value.trim(),
+    port: q('port').value.trim() || '4441',
+    mode: q('mode').value,
+    openocd: q('openocd').value.trim(),
+    target: q('target').value,
+    speed: q('speed').value.trim() || '1000',
+    gdb_port: q('gdb').value.trim() || '3333',
+  });
+  for(const [k,v] of Object.entries(extra||{})) p.set(k,v);
+  return p.toString();
+}
+
+async function post(path, extra){
+  const r = await fetch(path + '?' + params(extra), {method:'POST'});
+  return r.json();
+}
+
+function apply(s){
+  // header
+  q('dOcd').className = 'dot ' + (s.openocd_running ? 'ok' : 'bad');
+  q('tOcd').textContent = s.openocd_running
+      ? 'OpenOCD 运行中' + (s.uptime ? ' · ' + s.uptime + 's' : '') : 'OpenOCD 未运行';
+  q('pidLine').textContent = s.openocd_running ? ('pid ' + s.pid) : '';
+
+  if (s.test){
+    q('dProbe').className = 'dot ' + (s.test.ok ? 'ok' : 'bad');
+    q('tProbe').textContent = s.test.ok ? ('探针在线 · ' + s.test.ms + ' ms') : '探针不可达';
+    q('testBox').className = 'result ' + (s.test.ok ? 'ok' : 'bad');
+    q('testBox').textContent = s.test.msg;
+  }
+
+  const ideUp = s.gdb_clients > 0;
+  q('dIde').className = 'dot ' + (ideUp ? 'ok' : (s.gdb_listening ? 'warn' : ''));
+  q('tIde').textContent = ideUp ? ('IDE 已连接 · ' + s.gdb_clients + ' 个会话')
+                                : (s.gdb_listening ? '等待 IDE 连接' : 'IDE 未连接');
+
+  q('btnStart').disabled = s.openocd_running;
+  q('btnStop').disabled = !s.openocd_running;
+
+  if (first){
+    q('host').value = s.host;
+    q('port').value = s.port;
+    q('mode').value = s.mode;
+    q('openocd').value = s.openocd;
+    q('target').value = s.target;
+    q('speed').value = s.speed;
+    q('gdb').value = s.gdb_port;
+    first = false;
+  }
+
+  const log = q('log');
+  const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+  log.textContent = (s.log || []).join('\n');
+  if (atBottom) log.scrollTop = log.scrollHeight;
+
+  if (lastOcdRunning !== null && lastOcdRunning !== s.openocd_running){
+    // state flipped: refresh detection-dependent UI
+  }
+  lastOcdRunning = s.openocd_running;
+}
+
+async function refresh(){
+  try { apply(await (await fetch('/api/state')).json()); }
+  catch(e){ /* server restarting */ }
+}
+
+async function saveCfg(){ apply(await post('/api/config')); }
+async function saveAndTest(){
+  await post('/api/config');
+  apply(await post('/api/test'));
+}
+async function startOcd(){ apply(await post('/api/start')); }
+async function stopOcd(){ apply(await post('/api/stop')); }
+
+async function detect(){
+  q('found').textContent = '检测中…';
+  const list = await post('/api/detect');
+  if (!list.length){ q('found').innerHTML = '没有找到 OpenOCD。可以下载 Windows 版，解压后把 openocd.exe 放进程序目录的 tools\\openocd\\bin\\ 下。'; return; }
+  q('found').innerHTML = list.map(x =>
+    '• <b>' + x.path.replace(/</g,'&lt;') + '</b> <span class="badge">' + x.kind + '</span>'
+  ).join('<br>');
+  // 只有一个候选时自动填进去
+  if (list.length && !q('openocd').value.trim()){
+    q('openocd').value = list[0].path;
+    q('mode').value = list[0].kind === 'wsl' ? 'wsl' : 'exe';
+    post('/api/config');
+  }
+}
+
+refresh();
+setInterval(refresh, 1200);
+detect();
+</script>
+</body>
+</html>
